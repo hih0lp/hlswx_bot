@@ -1,0 +1,13 @@
+{
+  "name": "HLSWX — синхронизация подписей",
+  "id": "hlswx-sync-labels",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "reasoning": "Плагин работает только с открытым файлом и никуда не ходит."
+  }
+}

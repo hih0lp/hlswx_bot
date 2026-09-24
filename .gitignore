@@ -1,0 +1,91 @@
+# --- Рабочие материалы (ТЗ, скриншоты фиксов) ---
+# ТЗ и последующие версии ТЗ в любом формате
+ТЗ*.doc
+ТЗ*.docx
+ТЗ*.pdf
+ТЗ*.rtf
+ТЗ*.odt
+TZ*.doc
+TZ*.docx
+TZ*.pdf
+
+# Постановки задач
+task*.md
+
+# Картинки из корня репозитория (скриншоты для фиксов, screen.png, fix*.jpg и т.п.)
+# Рабочие ассеты лежат в assets/ и не попадают под это правило.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+/*.bmp
+
+# --- Секреты ---
+.env
+.env.local
+.env.*.local
+.env.testbed
+.claude/settings.local.json
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+venv/
+.venv/
+env/
+
+# --- Тесты и линтеры ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- IDE / ОС ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Данные и артефакты рантайма ---
+# Выгрузка макета из Figma (~98 МБ): воспроизводится scripts/figma_fetch_images.py
+docs/design/
+# Кэш file_id баннеров — заполняется Telegram при первой отправке
+assets/banner_ids.json
+*.log
+*.sqlite
+*.sqlite3
+*.db
+models/*
+!models/.gitkeep
+
+# --- Служебные скрипты с вшитыми паролями и токенами (не публиковать) ---
+/scripts/deploy.py
+/scripts/verify_relay.py
+/scripts/diag_telegram.py
+/scripts/probe_relay_network.py
+/scripts/fix_relay_firewall.py
+/scripts/fix_relay_url.py
+/scripts/_diag_now.py
+/scripts/_diag_now2.py
+/scripts/_sync_yk_key.py
+/scripts/_check_yk.py
+.env*
+!.env.example
+data/
+.claude/
+
+# Рабочие документы (отчёты заказчику, сверки с макетом, патч для Hammer) — не код
+/docs/

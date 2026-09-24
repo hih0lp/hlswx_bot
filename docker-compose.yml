@@ -1,0 +1,74 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - hwls_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - hwls_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: hwls_app
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "api.telegram.org:149.154.167.220"
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    volumes:
+      - hwls_models:/app/models
+
+  # Ежедневная резервная копия БД с ротацией (ТЗ 6.1)
+  backup:
+    image: postgres:16-alpine
+    container_name: hwls_backup
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      BACKUP_DIR: /backups
+      BACKUP_KEEP_DAYS: "14"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - hwls_backups:/backups
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "while true; do
+         sh /scripts/backup_db.sh || echo '[backup] неудачная попытка';
+         sleep 86400;
+       done"
+
+volumes:
+  hwls_postgres:
+  hwls_redis:
+  hwls_models:
+  hwls_backups:

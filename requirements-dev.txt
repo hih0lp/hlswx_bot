@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.3.3
+# >=0.26 — нужен asyncio_default_test_loop_scope (см. pytest.ini)
+pytest-asyncio>=0.26

@@ -1,0 +1,65 @@
+# Живой тестовый стенд (ТЗ п.5): вторая копия бота рядом с боевой.
+#
+#   docker compose -f docker-compose.testbed.yml up -d --build
+#
+# Полностью изолирован от боевого: своё имя проекта, свои контейнеры, тома,
+# сеть и база. Наружу торчит порт 8083, боевой остаётся на 8082.
+# Настройки берутся из .env.testbed — этого файла нет в репозитории,
+# он создаётся на сервере и содержит ТОЛЬКО тестовые токены.
+name: hwls-testbed
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: hwls_testbed_db
+    restart: unless-stopped
+    # POSTGRES_* приходят из env_file. Отдельный блок environment здесь не
+    # нужен и был бы вреден: ${...} подставляется из .env каталога проекта,
+    # которого тут нет, и переменные молча стали бы пустыми.
+    env_file: .env.testbed
+    volumes:
+      - testbed_postgres:/var/lib/postgresql/data
+    healthcheck:
+      # $$ — экранирование для compose: раскрывает шелл внутри контейнера
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: hwls_testbed_redis
+    restart: unless-stopped
+    volumes:
+      - testbed_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: hwls_testbed_app
+    restart: unless-stopped
+    env_file: .env.testbed
+    # Те же настройки сети, что и на боевом, — стенд должен вести себя так же.
+    extra_hosts:
+      - "api.telegram.org:149.154.167.220"
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Внутри контейнера порт остаётся 8082: на него завязан HEALTHCHECK
+    # в Dockerfile. Наружу отдаём 8083, чтобы не спорить с боевым.
+    ports:
+      - "8083:8082"
+    volumes:
+      - testbed_models:/app/models
+
+volumes:
+  testbed_postgres:
+  testbed_redis:
+  testbed_models:
