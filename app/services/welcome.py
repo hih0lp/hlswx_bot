@@ -49,6 +49,7 @@ async def _subscription_counts(telegram_id: int | None) -> tuple[int, int]:
                 select(func.count(Subscription.id)).where(
                     Subscription.user_id == user.id,
                     Subscription.status == SubscriptionStatus.active,
+                    Subscription.deleted_at.is_(None),
                     Subscription.expires_at > now,
                 ),
             )
@@ -58,6 +59,7 @@ async def _subscription_counts(telegram_id: int | None) -> tuple[int, int]:
                     Subscription.status.in_(
                         (SubscriptionStatus.active, SubscriptionStatus.expired),
                     ),
+                    Subscription.deleted_at.is_(None),
                     Subscription.expires_at <= now,
                 ),
             )
@@ -106,17 +108,25 @@ def home_screen_text(active: int, finished: int) -> str:
 def menu_reply_keyboard(user_id: int | None = None, *, has_subscription: bool = False) -> ReplyKeyboardMarkup:
     """Старая reply-клавиатура. Меню на неё больше не опирается, но тексты её
     кнопок бот по-прежнему понимает — они остались висеть у ранних пользователей."""
+    from app.services.tenant import current_partner_owner_id
     is_admin = access.is_staff(user_id)
-    return reply_main_keyboard(is_admin=is_admin, has_subscription=has_subscription)
+    owner_id = current_partner_owner_id()
+    return reply_main_keyboard(
+        is_admin=is_admin,
+        has_subscription=has_subscription,
+        is_partner_owner=bool(owner_id and user_id == owner_id),
+    )
 
 
-# Состав reply-клавиатуры, поставленной в чат: (админ, есть подписка).
+# Состав reply-клавиатуры, поставленной в чат: (админ, есть подписка, владелец
+# клона). Ключ — (бот, чат): у одного человека разные клавиатуры в основном
+# боте и в клоне.
 #
 # Telegram накладывает на такие сообщения два ограничения сразу: сообщение с
 # reply-клавиатурой нельзя редактировать, а если его удалить — клавиатура из
 # чата пропадает. Поэтому её носитель — экран меню при первом заходе: он
 # остаётся в чате как есть, а перерисовывается уже отдельный экран под ним.
-_KEYBOARD_CARRIER: dict[int, tuple[bool, bool]] = {}
+_KEYBOARD_CARRIER: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
 
 
 async def show_main_menu(message, *, user_id: int | None = None, edit: bool = False) -> None:
@@ -127,12 +137,16 @@ async def show_main_menu(message, *, user_id: int | None = None, edit: bool = Fa
     active, finished = await _subscription_counts(uid)
     text = home_screen_text(active, finished)
     chat_id = message.chat.id
+    from app.services.tenant import current_partner_id, current_partner_owner_id
+    owner_id = current_partner_owner_id()
     signature = (
         access.is_staff(uid),
         bool(active or finished),
+        bool(owner_id and uid == owner_id),
     )
+    carrier_key = (current_partner_id(), chat_id)
 
-    if _KEYBOARD_CARRIER.get(chat_id) != signature:
+    if _KEYBOARD_CARRIER.get(carrier_key) != signature:
         # Клавиатуры в чате ещё нет или её состав изменился — ставим вместе с
         # экраном меню. Это сообщение потом не редактируется: следующий раздел
         # уйдёт новым, а дальше всё уже перерисовывается на месте.
@@ -140,10 +154,12 @@ async def show_main_menu(message, *, user_id: int | None = None, edit: bool = Fa
             message,
             banners.MAIN_MENU,
             text,
-            reply_main_keyboard(is_admin=signature[0], has_subscription=signature[1]),
+            reply_main_keyboard(
+                is_admin=signature[0], has_subscription=signature[1], is_partner_owner=signature[2],
+            ),
         )
         banners.forget_screen(chat_id)
-        _KEYBOARD_CARRIER[chat_id] = signature
+        _KEYBOARD_CARRIER[carrier_key] = signature
         return
 
     await banners.show_screen(message, banners.MAIN_MENU, text, None, edit=edit)

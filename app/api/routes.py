@@ -36,10 +36,14 @@ async def health() -> dict:
 
 
 @api_router.get("/success")
-async def payment_success() -> dict:
+async def payment_success(bot: str | None = None) -> dict:
+    import re
+
+    # Клиент клона возвращается в бота клона: его имя приходит в return_url.
+    name = bot if bot and re.fullmatch(r"[A-Za-z0-9_]{3,64}", bot) else "HlswxPaySystemBot"
     return {
         "status": "ok",
-        "message": "Оплата обрабатывается. Вернитесь в Telegram-бот @HlswxPaySystemBot.",
+        "message": f"Оплата обрабатывается. Вернитесь в Telegram-бот @{name}.",
     }
 
 

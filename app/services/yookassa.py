@@ -44,6 +44,19 @@ class YooKassaService:
             Configuration.secret_key = self.settings.yookassa_secret_key
             return _payment_to_dict(Payment.find_one(payment_id))
 
+    def _verify_account_sync(self) -> dict[str, Any]:
+        from yookassa import Settings
+
+        with _CONFIGURATION_LOCK:
+            Configuration.account_id = self.settings.yookassa_shop_id
+            Configuration.secret_key = self.settings.yookassa_secret_key
+            return _payment_to_dict(Settings.get_account_settings())
+
+    async def verify_account(self) -> dict[str, Any]:
+        """Спросить у ЮKassa, чей это магазин (`account_id`) и тестовый ли он
+        (`test`). Бросает исключение SDK, если shopId/ключ не подходят."""
+        return await asyncio.to_thread(self._verify_account_sync)
+
     async def create_payment(
         self,
         amount: Decimal,

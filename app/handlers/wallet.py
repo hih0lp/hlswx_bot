@@ -26,6 +26,7 @@ from app.services.payments import (
     create_subscription_payment,
     create_topup_payment,
     mark_payment_succeeded,
+    payment_error_text,
     pay_package_from_balance,
     pay_subscription_from_balance,
 )
@@ -96,13 +97,16 @@ async def topup_card(callback: CallbackQuery, state: FSMContext) -> None:
         async with SessionLocal() as session:
             user = await get_or_create_user(session, callback.from_user)
             _, url = await create_topup_payment(session, user.id, amount)
-    except PaymentCreationError:
+    except PaymentCreationError as exc:
         await state.clear()
         await banners.show_screen(
             callback.message,
             banners.ATTENTION,
-            "<b>⚠️ Не удалось создать оплату</b>\n\n"
-            "Платёжная система временно недоступна. Попробуйте позже.",
+            payment_error_text(
+                exc,
+                "<b>⚠️ Не удалось создать оплату</b>\n\n"
+                "Платёжная система временно недоступна. Попробуйте позже.",
+            ),
             inline_home_row(),
             edit=True,
         )
@@ -113,8 +117,7 @@ async def topup_card(callback: CallbackQuery, state: FSMContext) -> None:
         callback.message,
         banners.TOPUP,
         f"💰 <b>Пополнение на {format_rub(amount)} ₽</b>\n\n"
-        "После подтверждения платежа средства появятся на балансе в профиле."
-        f"{PAYMENT_CTA}",
+        "После подтверждения платежа средства появятся на балансе в профиле.",
         pay_button(url, "💳 Пополнить баланс"),
         edit=True,
     )
@@ -228,7 +231,11 @@ async def pay_sub_card(callback: CallbackQuery) -> None:
                 select(Subscription).where(
                     Subscription.id == sub_id,
                     Subscription.user_id == user.id,
-                    Subscription.status == SubscriptionStatus.pending_payment,
+                    # `expired` / `active` — продление подписки («🔄 Продлить»).
+                    Subscription.status.in_(
+                        (SubscriptionStatus.pending_payment, SubscriptionStatus.expired, SubscriptionStatus.active),
+                    ),
+                    Subscription.deleted_at.is_(None),
                 ),
             )
             if not sub:
@@ -243,11 +250,13 @@ async def pay_sub_card(callback: CallbackQuery) -> None:
                 total_price,
                 f"HWLS подписка #{sub_id}",
             )
-    except PaymentCreationError:
+    except PaymentCreationError as exc:
         await banners.show_screen(
             callback.message,
             banners.ATTENTION,
-            "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            payment_error_text(
+                exc, "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            ),
             inline_home_row(),
             edit=True,
         )
@@ -276,7 +285,11 @@ async def pay_sub_balance(callback: CallbackQuery) -> None:
                 select(Subscription).where(
                     Subscription.id == sub_id,
                     Subscription.user_id == user.id,
-                    Subscription.status == SubscriptionStatus.pending_payment,
+                    # `expired` / `active` — продление подписки («🔄 Продлить»).
+                    Subscription.status.in_(
+                        (SubscriptionStatus.pending_payment, SubscriptionStatus.expired, SubscriptionStatus.active),
+                    ),
+                    Subscription.deleted_at.is_(None),
                 ),
             )
             if not sub:
@@ -338,11 +351,13 @@ async def pay_pkg_card(callback: CallbackQuery) -> None:
                 f"HWLS пакет #{order_id}",
             )
             price = order.price
-    except PaymentCreationError:
+    except PaymentCreationError as exc:
         await banners.show_screen(
             callback.message,
             banners.ATTENTION,
-            "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            payment_error_text(
+                exc, "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            ),
             inline_home_row(),
             edit=True,
         )

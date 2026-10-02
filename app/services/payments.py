@@ -44,6 +44,68 @@ class PaymentCreationError(Exception):
     """YooKassa or payment setup failed."""
 
 
+class PartnerPaymentsNotConfigured(PaymentCreationError):
+    """Владелец клона не указал реквизиты ЮKassa — принимать оплату некуда."""
+
+
+def payment_error_text(exc: BaseException, default: str) -> str:
+    """Что показать клиенту: «владелец не подключил оплату» — вместо общего
+    «платёжная система недоступна», если дело именно в этом."""
+    if isinstance(exc, PartnerPaymentsNotConfigured):
+        from app.core.texts import ERR_PARTNER_PAYMENTS_OFF
+        return ERR_PARTNER_PAYMENTS_OFF
+    return default
+
+
+# partner_id -> когда владельцу в последний раз писали, что оплата не настроена.
+_UNCONFIGURED_NOTICE_AT: dict[int, float] = {}
+_UNCONFIGURED_NOTICE_EVERY = 6 * 3600
+
+
+async def _notify_owner_payments_unconfigured(partner_id: int) -> None:
+    """Сообщить владельцу клона, что клиент не смог оплатить из-за пустых
+    реквизитов. Не чаще раза в несколько часов, чтобы не заспамить."""
+    import time
+
+    now = time.monotonic()
+    last = _UNCONFIGURED_NOTICE_AT.get(partner_id)
+    if last is not None and now - last < _UNCONFIGURED_NOTICE_EVERY:
+        return
+    _UNCONFIGURED_NOTICE_AT[partner_id] = now
+    try:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        from app.bot.runtime import _get_main_bot
+        from app.db.session import SessionLocal
+
+        async with SessionLocal() as session:
+            partner = await session.scalar(
+                select(WhitelabelPartner)
+                .where(WhitelabelPartner.id == partner_id)
+                .execution_options(skip_partner_scope=True)
+            )
+        if not partner or not partner.owner_telegram_id:
+            return
+        username = partner.bot_username
+        text = (
+            "<b>⚠️ Клиент не смог оплатить</b>\n\n"
+            + (f"В вашем боте @{username} клиент" if username else "В вашем боте клиент")
+            + " попытался оплатить, но платёжные реквизиты не указаны — оплата не прошла.\n\n"
+            "Откройте бота → «🏷 Франшиза» → «💳 Платёжные реквизиты» и укажите "
+            "shopId и секретный ключ вашего магазина в ЮKassa."
+        )
+        markup = None
+        if username:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"🤖 Открыть @{username}", url=f"https://t.me/{username}"),
+            ]])
+        await _get_main_bot().send_message(partner.owner_telegram_id, text, reply_markup=markup)
+    except Exception:
+        # Не доставили — не блокируем следующую попытку на несколько часов.
+        _UNCONFIGURED_NOTICE_AT.pop(partner_id, None)
+        logger.exception("Could not notify owner of partner_id=%s about missing payment credentials", partner_id)
+
+
 async def payment_provider_for_partner(settings, partner_id: int) -> YooKassaService:
     """Build an isolated YooKassa client for a tenant (ТЗ 6.6).
 
@@ -71,25 +133,51 @@ async def payment_provider_for_partner(settings, partner_id: int) -> YooKassaSer
         shop_id = os.getenv(prefix + "SHOP_ID", "").strip()
         secret_key = os.getenv(prefix + "SECRET_KEY", "").strip()
     if not shop_id or not secret_key:
-        raise PaymentCreationError("Partner YooKassa shop credentials are not configured")
-    return YooKassaService(settings.model_copy(update={
-        "yookassa_shop_id": shop_id,
-        "yookassa_secret_key": secret_key,
-    }))
+        raise PartnerPaymentsNotConfigured("Partner YooKassa shop credentials are not configured")
+    update = {"yookassa_shop_id": shop_id, "yookassa_secret_key": secret_key}
+    username = (partner.bot_username if partner else None) or ""
+    if username:
+        # Страница «оплата обработана» должна отправлять клиента в бота клона,
+        # а не в основной.
+        base = settings.yookassa_return_url
+        update["yookassa_return_url"] = f"{base}{'&' if '?' in base else '?'}bot={username}"
+    return YooKassaService(settings.model_copy(update=update))
 
 
 async def _tenant_payment_provider(settings) -> YooKassaService:
-    return await payment_provider_for_partner(settings, current_partner_id())
+    partner_id = current_partner_id()
+    try:
+        return await payment_provider_for_partner(settings, partner_id)
+    except PartnerPaymentsNotConfigured:
+        await _notify_owner_payments_unconfigured(partner_id)
+        raise
+
+
+def _next_period(sub: Subscription) -> tuple[datetime, datetime]:
+    """Период, на который активируется (или продлевается) подписка.
+
+    Новая и завершённая подписка идут от сегодняшнего дня. Продление действующей
+    («🔄 Продлить» в напоминании за сутки до конца) — от даты окончания
+    текущего периода: оставшиеся дни не сгорают.
+    """
+    starts, ends = subscription_period()
+    if sub.status == SubscriptionStatus.active and sub.expires_at and sub.expires_at > starts:
+        return sub.starts_at or starts, sub.expires_at + (ends - starts)
+    return starts, ends
 
 
 async def activate_subscription(session: AsyncSession, subscription_id: int) -> bool:
     sub = await session.scalar(select(Subscription).where(Subscription.id == subscription_id))
     if not sub:
         return False
-    starts, ends = subscription_period()
+    starts, ends = _next_period(sub)
     sub.status = SubscriptionStatus.active
     sub.starts_at = starts
     sub.expires_at = ends
+    # Продление завершённой подписки идёт через эту же активацию: у нового
+    # периода должны сработать и напоминание за сутки, и уведомление об окончании.
+    sub.reminded_at = None
+    sub.expired_notified_at = None
     return True
 
 
@@ -234,7 +322,11 @@ async def pay_subscription_from_balance(
         select(Subscription).where(
             Subscription.id == subscription_id,
             Subscription.user_id == user_id,
-            Subscription.status == SubscriptionStatus.pending_payment,
+            # `expired` / `active` — продление подписки («🔄 Продлить»).
+            Subscription.status.in_(
+                (SubscriptionStatus.pending_payment, SubscriptionStatus.expired, SubscriptionStatus.active),
+            ),
+            Subscription.deleted_at.is_(None),
         ),
     )
     if not sub:
@@ -388,11 +480,15 @@ async def activate_subscription_whitelist(
     sub = await session.scalar(select(Subscription).where(Subscription.id == subscription_id))
     if not sub:
         return
-    starts, ends = subscription_period()
+    starts, ends = _next_period(sub)
     sub.status = SubscriptionStatus.active
     sub.starts_at = starts
     sub.expires_at = ends
     sub.total_price = 0
+    # Бесплатное продление идёт через эту же активацию — у нового периода
+    # должны сработать напоминание за сутки и уведомление об окончании.
+    sub.reminded_at = None
+    sub.expired_notified_at = None
 
     payment_row = Payment(
         user_id=user_id,

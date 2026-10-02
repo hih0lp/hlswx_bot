@@ -25,9 +25,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from app.core.texts import (
-    BTN_HOME,
     BTN_SUB_INFO,
-    BTN_SUB_RENEW,
+    BTN_SUB_PROLONG,
     SUB_EXPIRED,
     SUB_EXPIRING_SOON,
 )
@@ -45,23 +44,24 @@ REMIND_BEFORE = timedelta(hours=24)
 
 
 def _keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    """Кнопки фрейма `144:211`.
+    """Кнопки фрейма `144:211`: «📄 Информация о подписке» и «🔄 Продлить».
 
-    В макете вторая кнопка — «🔄 Продлить», но механики продления в боте нет
-    (см. «Из макета, но за рамками этапа» в docs/figma_mapping.md), поэтому
-    ведём на оформление новой подписки.
+    «Продлить» продлевает ту же подписку с теми же городом, чатами и ценой:
+    после окончания — от сегодняшнего дня, в напоминании за сутки — от даты
+    окончания, так что оставшиеся дни не пропадают. Кнопки и порядок — как в
+    макете (правка заказчика 02.10.2026): без «Главного меню».
     """
+    prolong_cb = f"sub:renew:{subscription_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_SUB_RENEW, callback_data="menu:sub", style=STYLE_MAIN)],
             [
                 InlineKeyboardButton(
                     text=BTN_SUB_INFO,
                     callback_data=f"sub:card:{subscription_id}",
-                    style=STYLE_PLAIN,
+                    style=STYLE_MAIN,
                 ),
             ],
-            [InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)],
+            [InlineKeyboardButton(text=BTN_SUB_PROLONG, callback_data=prolong_cb, style=STYLE_PLAIN)],
         ],
     )
 

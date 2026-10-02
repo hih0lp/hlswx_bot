@@ -168,6 +168,8 @@ async def ensure_schema() -> None:
             # Напоминание об окончании подписки за 24 часа и уведомление об окончании
             "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ",
             "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS expired_notified_at TIMESTAMPTZ",
+            # Удаление завершённой подписки из «Моих подписок» — мягкое
+            "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS ix_subscriptions_status_expires ON subscriptions (status, expires_at)",
             # Срок действия записи белого списка и индекс под выручку за период
             "ALTER TABLE whitelist_entries ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",

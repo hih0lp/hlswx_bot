@@ -90,6 +90,14 @@ async def _subscription_reminder_worker() -> None:
         await asyncio.sleep(300)
 async def _payment_reconcile_worker() -> None:
     while True:
+        # Сверка смотрит платежи всех тенантов сразу, поэтому один проход за
+        # цикл: по проходу на каждого бота упирался в лимит запросов ЮKassa (429).
+        try:
+            count = await reconcile_pending_payments()
+            if count:
+                logger.info("Reconciled %s pending payment(s)", count)
+        except Exception:
+            logger.exception("Payment reconcile error")
         for bot in all_polling_bots():
             partner = get_partner_for_bot(bot.id)
             with partner_scope(
@@ -98,12 +106,9 @@ async def _payment_reconcile_worker() -> None:
                 getattr(partner, "franchise_tier", "") if partner else "",
             ):
                 try:
-                    count = await reconcile_pending_payments()
-                    if count:
-                        logger.info("Reconciled %s pending payment(s) bot_id=%s", count, bot.id)
                     await cancel_stale_payments()
                 except Exception:
-                    logger.exception("Payment reconcile error bot_id=%s", bot.id)
+                    logger.exception("Stale payments cleanup error bot_id=%s", bot.id)
         await asyncio.sleep(90)
 async def _franchise_billing_worker() -> None:
     while True:

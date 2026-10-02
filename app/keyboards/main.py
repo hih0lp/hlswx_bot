@@ -30,10 +30,14 @@ from app.core.texts import (
     BTN_INTEGRATION,
     BTN_MYSUBS,
     BTN_PROFILE,
+    BTN_PUB_EDIT,
     BTN_PUBLISH,
     BTN_RETRY_PAY,
     BTN_RULES,
     BTN_START,
+    BTN_SUB_DELETE,
+    BTN_SUB_DELETE_CANCEL,
+    BTN_SUB_PROLONG,
     BTN_SUBSCRIPTION,
     BTN_TOPUP,
 )
@@ -55,12 +59,17 @@ SUBS_PER_PAGE = 5
 
 # --------------------------------------------------------------------- reply
 
-def reply_main_keyboard(*, is_admin: bool = False, has_subscription: bool = False) -> ReplyKeyboardMarkup:
+def reply_main_keyboard(
+    *, is_admin: bool = False, has_subscription: bool = False, is_partner_owner: bool = False,
+) -> ReplyKeyboardMarkup:
     """Главное меню — фрейм «Home».
 
     Без подписки главное действие — «Начать оформление», с подпиской —
     «Опубликовать». Пакет, Подключить и Платформа из меню убраны по макету;
     сами разделы остались доступны по командам.
+
+    «Франшиза» в клоне видна только его владельцу: там он указывает платёжные
+    реквизиты, без которых клиенты клона не могут платить.
     """
     main_btn = BTN_PUBLISH if has_subscription else BTN_START
     rows = [
@@ -70,7 +79,7 @@ def reply_main_keyboard(*, is_admin: bool = False, has_subscription: bool = Fals
             KeyboardButton(text=BTN_SUBSCRIPTION, style=STYLE_PLAIN),
         ],
     ]
-    if current_partner_id() == 0:
+    if current_partner_id() == 0 or is_partner_owner:
         rows.append([KeyboardButton(text=BTN_FRANCHISE, style=STYLE_PLAIN)])
     if is_admin:
         rows.append([KeyboardButton(text=ADMIN_BTN, style=STYLE_DANGER)])
@@ -298,11 +307,18 @@ def subscriptions_keyboard(items, *, page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_card_keyboard(chats) -> InlineKeyboardMarkup:
-    """Фрейм «Моя подписка»: чаты подписки ссылками, ниже выход в меню.
+def subscription_card_keyboard(
+    chats,
+    *,
+    sub_id: int | None = None,
+    manageable: bool = False,
+) -> InlineKeyboardMarkup:
+    """Фрейм «Моя подписка»: чаты подписки ссылками, ниже действия.
 
-    Кнопки «Продлить» и «Удалить» из макета требуют новой механики и в этап
-    не входят — вместо них навигация.
+    У завершённой подписки (`manageable`) — «🔄 Продлить» и «🗑 Удалить», как в
+    кадре 146:111. У действующей в макете кнопок нет, поэтому остаётся
+    навигация. «Продлить» продлевает именно эту подписку — с её городом,
+    чатами, объёмом и ценой (`subscription_renew`), в том числе бесплатную.
     """
     rows = [
         [
@@ -315,9 +331,33 @@ def subscription_card_keyboard(chats) -> InlineKeyboardMarkup:
         for chat in chats
         if chat.telegram_username
     ]
+    if manageable and sub_id is not None:
+        rows.append([
+            InlineKeyboardButton(
+                text=BTN_SUB_PROLONG,
+                callback_data=f"sub:renew:{sub_id}",
+                style=STYLE_MAIN,
+            ),
+        ])
+        rows.append([
+            InlineKeyboardButton(text=BTN_SUB_DELETE, callback_data=f"sub:del:{sub_id}", style=STYLE_PLAIN),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     rows.append([InlineKeyboardButton(text=BTN_MYSUBS, callback_data="profile:mysubs", style=STYLE_PLAIN)])
     rows.append([_home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_delete_keyboard(sub_id: int) -> InlineKeyboardMarkup:
+    """Кадр «Удаление подписки»: «🗑 Удалить» и «🚫 Отмена» в одном ряду."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=BTN_SUB_DELETE, callback_data=f"sub:delok:{sub_id}", style=STYLE_PLAIN),
+                InlineKeyboardButton(text=BTN_SUB_DELETE_CANCEL, callback_data=f"sub:card:{sub_id}", style=STYLE_PLAIN),
+            ],
+        ],
+    )
 
 
 def publication_keyboard(publication_id: int) -> InlineKeyboardMarkup:
@@ -326,7 +366,7 @@ def publication_keyboard(publication_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=BTN_EDIT_TEXT,
+                    text=BTN_PUB_EDIT,
                     callback_data=f"pub:edit:{publication_id}",
                     style=STYLE_MAIN,
                 ),

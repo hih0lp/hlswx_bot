@@ -53,29 +53,52 @@ async def show_franchise(message: Message, *, tg_user=None, edit: bool = False) 
     В основном боте владелец видит список всех своих клонов и может подключить
     ещё один. В клоне отображается только панель текущей франшизы.
     """
-    from app.core.texts import BTN_BACK, BTN_FRANCHISE_START, BTN_HOME, FRANCHISE_TEXT
-    from app.services import banners
-
     if current_partner_id():
-        await _clone_franchise_panel(message, tg_user or message.from_user, edit=edit)
+        clone_user = tg_user or message.from_user
+        if not (clone_user and clone_user.id == current_partner_owner_id()):
+            # Тариф, статус и оплата франшизы — только для владельца клона.
+            await message.answer("Раздел доступен только владельцу бота.")
+            return
+        await _clone_franchise_panel(message, clone_user, edit=edit)
         return
     user_obj = tg_user or message.from_user
-    partners = await _partners_for_user(user_obj.id)
+    partners = _without_unpaid_attempts(await _partners_for_user(user_obj.id))
     if not partners:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=BTN_FRANCHISE_START, callback_data="franchise:join", style=STYLE_MAIN)],
-                [InlineKeyboardButton(text=BTN_BACK, callback_data="menu:home", style=STYLE_PLAIN)],
-            ],
-        )
-        await banners.show_screen(message, banners.FRANCHISE, FRANCHISE_TEXT, kb, edit=edit)
+        await _franchise_start_screen(message, edit=edit)
         return
     await _owned_franchise_panel(message, user_obj.id, partners, edit=edit)
 
 
+def _without_unpaid_attempts(partners: list[WhitelabelPartner]) -> list[WhitelabelPartner]:
+    """Попытки оплаты, не доведённые до конца, пользователю не показываем.
+
+    Выбрал тариф, открыл оплату и вышел — в «Мои боты-франшизы» такая попытка
+    не попадает и кнопки «Продолжить …» от неё нет: следующий вход начинается с
+    чистого экрана. Саму запись из базы не удаляем — если оплата по старой
+    ссылке всё же пройдёт, платёж должен найти своего партнёра; а новый выбор
+    тарифа переиспользует эту же запись (`franchise_join_tier`).
+    """
+    return [p for p in partners if p.franchise_billing_status != "pending"]
+
+
+async def _franchise_start_screen(message: Message, *, edit: bool = False) -> None:
+    """Стартовый экран «Франшиза» — для тех, у кого ещё нет ни одного бота."""
+    from app.core.texts import BTN_BACK, BTN_FRANCHISE_START, FRANCHISE_TEXT
+    from app.services import banners
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_FRANCHISE_START, callback_data="franchise:join", style=STYLE_MAIN)],
+            [InlineKeyboardButton(text=BTN_BACK, callback_data="menu:home", style=STYLE_PLAIN)],
+        ],
+    )
+    await banners.show_screen(message, banners.FRANCHISE, FRANCHISE_TEXT, kb, edit=edit, replace=edit)
+
+
 @franchise_router.message(Command("franchise"))
 @franchise_router.message(F.text == "🏷 Франшиза")
-async def franchise_entry(message: Message) -> None:
+async def franchise_entry(message: Message, state) -> None:
+    await state.clear()
     await show_franchise(message)
 
 
@@ -124,7 +147,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
     if not partner or partner.owner_telegram_id != telegram_id:
         await banners.show_screen(
             message, banners.PLAIN, "Подключение не найдено. Откройте раздел «Франшиза» заново.",
-            edit=edit, keep_markup=True,
+            edit=edit, replace=edit,
         )
         return
     tier = partner.franchise_tier
@@ -135,7 +158,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
             message, banners.PLAIN,
             "Этот бот уже зарегистрирован. Оплата не создана. "
             "Используйте отдельного бота, который ещё не подключался.",
-            edit=edit, keep_markup=True,
+            edit=edit, replace=edit,
         )
         return
     except Exception:
@@ -147,7 +170,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
         await banners.show_screen(
             message, banners.PLAIN,
             "Не удалось создать ссылку оплаты. Подключение сохранено — попробуйте позже через раздел «Франшиза».",
-            keyboard, edit=edit, keep_markup=True,
+            keyboard, edit=edit, replace=edit,
         )
         return
     price = TIER_PRICES.get(tier, TIER_PRICES["basic"])
@@ -157,7 +180,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
     ])
     await banners.show_screen(
         message, banners.PLAIN, FRANCHISE_PAYMENT_TEXT.format(price=price),
-        keyboard, edit=edit, keep_markup=True,
+        keyboard, edit=edit, replace=edit,
     )
 
 
@@ -175,7 +198,7 @@ async def franchise_join(callback, state) -> None:
         "<b>Подключение бота-клона</b>\nВыберите тариф франшизы:",
         _join_tier_keyboard(),
         edit=True,
-        keep_markup=True,
+        replace=True,
     )
 
 
@@ -269,7 +292,21 @@ async def franchise_enter_token(callback, state) -> None:
     await state.update_data(franchise_partner_id=partner.id)
     await state.set_state(FranchiseOnboarding.waiting_bot_token)
     await callback.answer()
-    await callback.message.answer(FRANCHISE_CREATE_BOT_TEXT)
+    await callback.message.answer(FRANCHISE_CREATE_BOT_TEXT, reply_markup=_cancel_kb("franchise:cancel_token"))
+
+
+@franchise_router.callback_query(F.data == "franchise:cancel_token")
+async def franchise_token_cancel(callback, state) -> None:
+    if current_partner_id():
+        await callback.answer("Недоступно в боте-клоне", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer("Отменено")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await _owned_franchise_panel(callback.message, callback.from_user.id, edit=False)
 
 
 @franchise_router.message(FranchiseOnboarding.waiting_bot_token)
@@ -338,6 +375,7 @@ async def franchise_receive_token(message: Message, state) -> None:
     await _notify_admins_partner_connected(message.from_user, username, tier, launched_id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🤖 Открыть @{username}", url=f"https://t.me/{username}", style=STYLE_MAIN)],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home", style=STYLE_PLAIN)],
     ])
     await status_message.edit_text(FRANCHISE_CONNECTED_TEXT, reply_markup=kb)
@@ -380,8 +418,15 @@ async def _clone_franchise_panel(message: Message, user, *, edit: bool = False) 
     async with SessionLocal() as session:
         partner = await session.scalar(select(WhitelabelPartner).where(WhitelabelPartner.id == current_partner_id()))
     billing_status = partner.franchise_billing_status if partner else "pending"
-    status = {"active": "подключён", "grace": "ожидает оплаты — льготный период", "suspended": "приостановлен", "manual": "ожидает настройки автопродления", "pending": "ожидает оплаты"}.get(billing_status, billing_status)
-    lines = ["<b>Франшиза</b>", "", f"Тариф: <b>{TIER_LABELS.get(tier, 'Базовый')}</b> — {price} ₽/мес", f"Статус: {status}", "", "Для автопродления ЮKassa попросит подтвердить сохранение способа оплаты при первом платеже."]
+    status = {"active": "подключён", "grace": "ожидает оплаты — льготный период", "suspended": "приостановлен", "manual": "подключён, продление вручную", "pending": "ожидает оплаты"}.get(billing_status, billing_status)
+    lines = ["<b>Франшиза</b>", "", f"Тариф: <b>{TIER_LABELS.get(tier, 'Базовый')}</b> — {price} ₽/мес", f"Статус: {status}"]
+    if owner:
+        has_payout = bool(partner and partner.yookassa_shop_id and partner.yookassa_secret_key)
+        lines.append(
+            "Приём оплаты от клиентов: ✅ подключён" if has_payout
+            else "Приём оплаты от клиентов: ⚠️ не настроен — укажите «Платёжные реквизиты», иначе клиенты не смогут оплатить"
+        )
+    lines += ["", "Тариф оплачивается на месяц. Чтобы продлить, выберите тариф ниже."]
     rows = []
     if owner:
         for code in ("basic", "standard", "premium"):
@@ -389,11 +434,14 @@ async def _clone_franchise_panel(message: Message, user, *, edit: bool = False) 
         rows.append([InlineKeyboardButton(text="💳 Платёжные реквизиты", callback_data="franchise:payout", style=STYLE_PLAIN)])
     rows.append([InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await banners.show_screen(message, banners.FRANCHISE, "\n".join(lines), kb, edit=edit)
+    await banners.show_screen(message, banners.FRANCHISE, "\n".join(lines), kb, edit=edit, replace=edit)
 
 
 @franchise_router.callback_query(F.data == "franchise:menu")
 async def clone_franchise_menu(callback) -> None:
+    if current_partner_id() and not _require_clone_owner(callback):
+        await callback.answer("Раздел доступен только владельцу бота", show_alert=True)
+        return
     await callback.answer()
     await _clone_franchise_panel(callback.message, callback.from_user, edit=True)
 
@@ -413,15 +461,21 @@ async def clone_franchise_plan(callback) -> None:
         return
     await callback.answer("Ссылка на оплату готова")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Перейти к оплате и подключить автопродление", url=url, style=STYLE_MAIN)],
+        [InlineKeyboardButton(text="💳 Перейти к оплате", url=url, style=STYLE_MAIN)],
         [InlineKeyboardButton(text="← Назад", callback_data="franchise:menu", style=STYLE_PLAIN)],
     ])
     from app.services import banners
     await banners.show_screen(
         callback.message, banners.PLAIN,
-        "При первом платеже ЮKassa попросит подтвердить сохранение способа оплаты. Продолжая оплату, вы подключаете ежемесячное автопродление тарифа.",
-        kb, edit=True, keep_markup=True,
+        "Оплата тарифа — за один месяц. Нажмите кнопку ниже, чтобы перейти к оплате.",
+        kb, edit=True, replace=True,
     )
+
+
+def _cancel_kb(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data=callback_data, style=STYLE_PLAIN)],
+    ])
 
 
 def _require_clone_owner(callback) -> bool:
@@ -464,7 +518,7 @@ async def franchise_payout_menu(callback, state) -> None:
     await callback.answer()
     text, kb = await _payout_menu_text_kb(current_partner_id())
     from app.services import banners
-    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, keep_markup=True)
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
 
 
 @franchise_router.callback_query(F.data == "franchise:payout:start")
@@ -479,7 +533,32 @@ async def franchise_payout_start(callback, state) -> None:
     await state.update_data(franchise_payout_partner_id=current_partner_id())
     await state.set_state(FranchisePayout.waiting_shop_id)
     await callback.answer()
-    await callback.message.answer(FRANCHISE_PAYOUT_ASK_SHOP_ID)
+    prompt = await callback.message.answer(
+        FRANCHISE_PAYOUT_ASK_SHOP_ID, reply_markup=_cancel_kb("franchise:payout:cancel"),
+    )
+    await state.update_data(franchise_payout_prompt_id=prompt.message_id)
+
+
+@franchise_router.callback_query(F.data == "franchise:payout:cancel")
+async def franchise_payout_cancel(callback, state) -> None:
+    if not _require_clone_owner(callback):
+        await callback.answer("Раздел доступен только владельцу бота", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer("Отменено")
+    text, kb = await _payout_menu_text_kb(current_partner_id())
+    from app.services import banners
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
+
+
+async def _drop_prompt_markup(message: Message, state) -> None:
+    prompt_id = (await state.get_data()).get("franchise_payout_prompt_id")
+    if not prompt_id:
+        return
+    try:
+        await message.bot.edit_message_reply_markup(chat_id=message.chat.id, message_id=prompt_id, reply_markup=None)
+    except Exception:
+        pass
 
 
 @franchise_router.callback_query(F.data == "franchise:payout:clear")
@@ -496,7 +575,7 @@ async def franchise_payout_clear(callback) -> None:
     await callback.answer("Реквизиты удалены")
     text, kb = await _payout_menu_text_kb(current_partner_id())
     from app.services import banners
-    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, keep_markup=True)
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
 
 
 @franchise_router.message(FranchisePayout.waiting_shop_id)
@@ -510,14 +589,21 @@ async def franchise_payout_receive_shop_id(message: Message, state) -> None:
         await message.answer("Отменено.")
         return
     if not shop_id.isdigit() or not (3 <= len(shop_id) <= 20):
-        await message.answer("shopId выглядит некорректно — это просто число из личного кабинета ЮKassa. Отправьте его ещё раз или напишите «Отмена».")
+        await message.answer(
+            "shopId выглядит некорректно — это просто число из личного кабинета ЮKassa. Отправьте его ещё раз.",
+            reply_markup=_cancel_kb("franchise:payout:cancel"),
+        )
         return
     from app.core.texts import FRANCHISE_PAYOUT_ASK_SECRET_KEY
     from app.states.flows import FranchisePayout
 
+    await _drop_prompt_markup(message, state)
     await state.update_data(franchise_payout_shop_id=shop_id)
     await state.set_state(FranchisePayout.waiting_secret_key)
-    await message.answer(FRANCHISE_PAYOUT_ASK_SECRET_KEY)
+    prompt = await message.answer(
+        FRANCHISE_PAYOUT_ASK_SECRET_KEY, reply_markup=_cancel_kb("franchise:payout:cancel"),
+    )
+    await state.update_data(franchise_payout_prompt_id=prompt.message_id)
 
 
 @franchise_router.message(FranchisePayout.waiting_secret_key)
@@ -537,13 +623,72 @@ async def franchise_payout_receive_secret_key(message: Message, state) -> None:
         await message.answer("Отменено.")
         return
     if len(secret_key) < 20 or "_" not in secret_key:
-        await message.answer("Секретный ключ выглядит некорректно. Отправьте его ещё раз из личного кабинета ЮKassa или напишите «Отмена».")
+        await message.answer(
+            "Секретный ключ выглядит некорректно. Отправьте его ещё раз из личного кабинета ЮKassa.",
+            reply_markup=_cancel_kb("franchise:payout:cancel"),
+        )
         return
     shop_id = data.get("franchise_payout_shop_id")
     if not shop_id:
         await state.clear()
         await message.answer("Шаг с shopId сброшен. Откройте «Платёжные реквизиты» заново.")
         return
+
+    # Не сохраняем вслепую: спрашиваем у ЮKassa, подходит ли пара shopId/ключ.
+    # Опечатка вылезает сразу у владельца, а не у первого клиента на оплате.
+    from app.config import get_settings
+    from app.core.texts import (
+        FRANCHISE_PAYOUT_MODE_LIVE,
+        FRANCHISE_PAYOUT_MODE_TEST,
+        FRANCHISE_PAYOUT_REJECTED,
+        FRANCHISE_PAYOUT_UNVERIFIED,
+        FRANCHISE_PAYOUT_WEBHOOK_HINT,
+    )
+    from app.services.yookassa import YooKassaService
+
+    settings = get_settings()
+    checker = YooKassaService(settings.model_copy(update={
+        "yookassa_shop_id": shop_id, "yookassa_secret_key": secret_key,
+    }))
+    retry_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Ввести заново", callback_data="franchise:payout:start", style=STYLE_MAIN)],
+        [InlineKeyboardButton(text="← Назад", callback_data="franchise:payout", style=STYLE_PLAIN)],
+    ])
+    info: dict | None = None
+    try:
+        info = await checker.verify_account()
+    except Exception as exc:
+        reason = type(exc).__name__
+        logger.warning("Payout credentials check failed partner_id=%s reason=%s", partner_id, reason)
+        if reason == "UnauthorizedError":
+            # Единственный явный отказ: ЮKassa не знает такой пары shopId/ключ.
+            await _drop_prompt_markup(message, state)
+            await state.clear()
+            await message.answer(FRANCHISE_PAYOUT_REJECTED, reply_markup=retry_kb)
+            return
+        if reason not in {"ForbiddenError", "NotFoundError", "BadRequestError"}:
+            # Сеть/сбой ЮKassa — не сохраняем вслепую, пусть повторит.
+            await _drop_prompt_markup(message, state)
+            await state.clear()
+            await message.answer(FRANCHISE_PAYOUT_UNVERIFIED, reply_markup=retry_kb)
+            return
+        # ЮKassa отвечает, но не отдаёт сведения о магазине по этому ключу —
+        # валидную пару из-за этого не отвергаем.
+        info = None
+    is_test = False
+    receipts_on = False
+    if info is not None:
+        account_id = str(info.get("account_id") or "")
+        if account_id and account_id != shop_id:
+            await _drop_prompt_markup(message, state)
+            await state.clear()
+            await message.answer(FRANCHISE_PAYOUT_REJECTED, reply_markup=retry_kb)
+            return
+        is_test = bool(info.get("test"))
+        fiscal = info.get("fiscalization")
+        receipts_on = bool(info.get("fiscalization_enabled")) or (
+            isinstance(fiscal, dict) and bool(fiscal.get("enabled"))
+        )
 
     async with SessionLocal() as session:
         partner = await session.scalar(select(WhitelabelPartner).where(WhitelabelPartner.id == partner_id))
@@ -554,10 +699,30 @@ async def franchise_payout_receive_secret_key(message: Message, state) -> None:
         partner.yookassa_shop_id = shop_id
         partner.yookassa_secret_key = secret_key
         await session.commit()
+    await _drop_prompt_markup(message, state)
     await state.clear()
 
-    from app.core.texts import FRANCHISE_PAYOUT_SAVED
-    await message.answer(FRANCHISE_PAYOUT_SAVED)
+    from app.core.texts import (
+        FRANCHISE_PAYOUT_RECEIPT_WARN,
+        FRANCHISE_PAYOUT_SAVED,
+        FRANCHISE_PAYOUT_UNCHECKED,
+    )
+    if info is None:
+        mode = "режим не определён"
+    else:
+        mode = FRANCHISE_PAYOUT_MODE_TEST if is_test else FRANCHISE_PAYOUT_MODE_LIVE
+    text = FRANCHISE_PAYOUT_SAVED.format(shop_id=shop_id, mode=mode)
+    if info is None:
+        text += FRANCHISE_PAYOUT_UNCHECKED
+    if receipts_on:
+        text += FRANCHISE_PAYOUT_RECEIPT_WARN
+    base = settings.public_url.rstrip("/")
+    # ЮKassa принимает уведомления только по HTTPS (порт 443 или 8443).
+    if base.startswith("https://"):
+        text += FRANCHISE_PAYOUT_WEBHOOK_HINT.format(url=f"{base}/payments/yookassa/webhook")
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Платёжные реквизиты", callback_data="franchise:payout", style=STYLE_PLAIN)],
+    ]))
 
 
 async def _owned_franchise_panel(message: Message, telegram_id: int, partners: list[WhitelabelPartner] | None = None, *, edit: bool = False) -> None:
@@ -566,7 +731,12 @@ async def _owned_franchise_panel(message: Message, telegram_id: int, partners: l
 
     from app.services.franchise_billing import TIER_LABELS
 
-    partners = partners if partners is not None else await _partners_for_user(telegram_id)
+    partners = _without_unpaid_attempts(
+        partners if partners is not None else await _partners_for_user(telegram_id),
+    )
+    if not partners:
+        await _franchise_start_screen(message, edit=edit)
+        return
     lines = [FRANCHISE_TEXT, "", "<b>Мои боты-франшизы</b>", ""]
     rows = []
     status_labels = {
@@ -593,16 +763,10 @@ async def _owned_franchise_panel(message: Message, telegram_id: int, partners: l
                 callback_data=f"franchise:open:{partner.id}",
                 style=STYLE_PLAIN,
             )])
-        elif partner.bot_username is None:
-            # Тариф выбран, оплаты ещё не было — обычная кнопка: зелёный
-            # оставляем только для случаев, которые реально требуют внимания
-            # (остановленный за неуплату бот), а не для каждой попытки оплаты.
-            rows.append([InlineKeyboardButton(
-                text=f"💳 Продолжить {label}",
-                callback_data=f"franchise:resume:{partner.id}",
-                style=STYLE_PLAIN,
-            )])
         else:
+            # Бот остановлен за неуплату (льготный период, приостановка) —
+            # единственный случай, когда «Продолжить» нужно: неоплаченные
+            # попытки подключения сюда не попадают (`_without_unpaid_attempts`).
             rows.append([InlineKeyboardButton(
                 text=f"💳 Продолжить {label}",
                 callback_data=f"franchise:resume:{partner.id}",
@@ -620,6 +784,7 @@ async def _owned_franchise_panel(message: Message, telegram_id: int, partners: l
         "\n".join(lines),
         InlineKeyboardMarkup(inline_keyboard=rows),
         edit=edit,
+        replace=edit,
     )
 
 
@@ -683,4 +848,4 @@ async def _franchise_panel(message: Message, partner: WhitelabelPartner, *, edit
             [InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)],
         ],
     )
-    await banners.show_screen(message, banners.PLAIN, "\n".join(lines), kb, edit=edit, keep_markup=True)
+    await banners.show_screen(message, banners.PLAIN, "\n".join(lines), kb, edit=edit, replace=edit)

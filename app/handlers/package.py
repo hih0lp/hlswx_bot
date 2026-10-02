@@ -32,7 +32,7 @@ from app.ml.categories import PACKAGE_CITY_KEYS, PACKAGE_TARIFFS
 from app.models.entities import Chat, City, PackageOrder
 from app.services.flow_ui import edit_flow_callback, show_flow_step
 from app.services.menu_nav import dispatch_menu_button
-from app.services.payments import PaymentCreationError, create_package_payment
+from app.services.payments import PaymentCreationError, create_package_payment, payment_error_text
 from app.services.users import get_or_create_user
 from app.states.flows import PackageFlow
 
@@ -111,11 +111,13 @@ async def _finalize_package(message: Message, state: FSMContext, data: dict) -> 
                 price,
                 f"HWLS пакет #{order_id}",
             )
-    except PaymentCreationError:
+    except PaymentCreationError as exc:
         await show_flow_step(
             message,
             state,
-            "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            payment_error_text(
+                exc, "<b>⚠️ Не удалось создать оплату</b>\n\nПопробуйте через пару минут.",
+            ),
             inline_home_row(),
         )
         await state.clear()

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 
 from aiogram import Bot
@@ -83,7 +84,12 @@ def _render_notification(
     if state == STATE_QUEUED:
         lines = [NOTIFY_QUEUED]
     elif state in (STATE_PUBLISHED, STATE_PARTIAL):
-        lines = [NOTIFY_PUBLISHED_HEADER, "", body]
+        # В макете («Уведомление») текст объявления лежит в серой цитате.
+        # Экранируем: текст пользовательский, а сообщение уходит в HTML-режиме —
+        # одна «<» в объявлении иначе ломала бы само уведомление.
+        lines = [NOTIFY_PUBLISHED_HEADER, ""]
+        if body:
+            lines.append(f"<blockquote>{html.escape(body, quote=False)}</blockquote>")
         if len(jobs) > 1:
             marks = {status: "✅" for status in _LANDED_STATUSES}
             marks.update({status: "⏳" for status in _PENDING_STATUSES})

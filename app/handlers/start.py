@@ -13,7 +13,8 @@ start_router = Router()
 
 
 @start_router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await send_welcome(message)
 
 
@@ -29,7 +30,8 @@ async def show_rules(message: Message, *, edit: bool = False) -> None:
 
 @start_router.message(Command("rules"))
 @start_router.message(F.text.in_({"📄 Правила", "📌 Правила"}))
-async def cmd_rules(message: Message) -> None:
+async def cmd_rules(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await show_rules(message)
 
 
@@ -53,7 +55,8 @@ async def show_profile(message: Message, *, tg_user=None, edit: bool = False) ->
 
 @start_router.message(Command("profile"))
 @start_router.message(F.text == "👤 Профиль")
-async def cmd_profile(message: Message) -> None:
+async def cmd_profile(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await show_profile(message)
 
 

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
+from yookassa.domain.exceptions.forbidden_error import ForbiddenError
 
 from app.config import get_settings
 from app.db.session import SessionLocal
@@ -69,15 +70,35 @@ async def start_plan_checkout(partner_id: int, telegram_id: int, tier: str) -> s
             payment = Payment(user_id=owner.id, amount=Decimal(TIER_PRICES[tier]), purpose="franchise", purpose_id=partner.id, invoice_id=invoice, status=PaymentStatus.pending, save_payment_method=True)
             session.add(payment)
             await session.flush()
+            yookassa = YooKassaService(get_settings())
+            description = f"Тариф франшизы {TIER_LABELS[tier]} на месяц"
+            metadata = {"purpose": "franchise", "partner_id": str(partner.id), "tier": tier, "invoice_id": invoice}
+            amount = payment.amount
             try:
-                data = await YooKassaService(get_settings()).create_payment(
-                    payment.amount, f"Тариф франшизы {TIER_LABELS[tier]} на месяц",
-                    {"purpose": "franchise", "partner_id": str(partner.id), "tier": tier, "invoice_id": invoice},
-                    idempotence_key=invoice, save_payment_method=True,
-                )
+                try:
+                    data = await yookassa.create_payment(
+                        amount, description, metadata,
+                        idempotence_key=invoice, save_payment_method=True,
+                    )
+                except ForbiddenError:
+                    # Магазин платформы не подключён к автоплатежам («This store
+                    # can't make recurring payments»). Без сохранения карты
+                    # владелец всё равно может оплатить месяц: партнёр уйдёт в
+                    # режим `manual`, а продлевать тариф придётся вручную.
+                    logger.warning(
+                        "Магазин ЮKassa не принимает автоплатежи — платёж франшизы partner_id=%s "
+                        "создаётся без сохранения карты", partner_id,
+                    )
+                    payment.save_payment_method = False
+                    data = await yookassa.create_payment(
+                        amount, description, metadata,
+                        idempotence_key=f"{invoice}-once", save_payment_method=False,
+                    )
             except Exception:
                 await session.rollback()
-                logger.exception("Could not create franchise checkout partner_id=%s", partner.id)
+                # `partner` после rollback «протух»: обращение к его полям
+                # даёт MissingGreenlet и прячет настоящую ошибку.
+                logger.exception("Could not create franchise checkout partner_id=%s", partner_id)
                 raise RuntimeError("Не удалось создать оплату франшизы") from None
             payment.provider_payment_id = data.get("id")
             payment.confirmation_url = YooKassaService.extract_confirmation_url(data)
@@ -117,7 +138,12 @@ async def prompt_for_bot_token(partner: WhitelabelPartner) -> None:
         await state.set_state(FranchiseOnboarding.waiting_bot_token)
         await state.update_data(franchise_tier=partner.franchise_tier, franchise_partner_id=partner.id)
         await banners.delete_last_screen(bot, partner.owner_telegram_id)
-        await bot.send_message(partner.owner_telegram_id, FRANCHISE_CREATE_BOT_TEXT)
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✖️ Отмена", callback_data="franchise:cancel_token")],
+        ])
+        await bot.send_message(partner.owner_telegram_id, FRANCHISE_CREATE_BOT_TEXT, reply_markup=cancel_kb)
     except Exception:
         logger.exception("Could not prompt for bot token partner_id=%s", partner.id)
 
@@ -149,7 +175,14 @@ async def process_franchise_billing(now: datetime | None = None) -> dict[str, in
                         stats["reminded"] += 1
                         await session.commit()
                         price = TIER_PRICES.get(partner.franchise_tier, TIER_PRICES["basic"])
-                        await _notify(partner.owner_telegram_id, f"Через три дня будет списана оплата тарифа франшизы: {price} ₽/мес.")
+                        if partner.franchise_payment_method_id:
+                            reminder = f"Через три дня будет списана оплата тарифа франшизы: {price} ₽/мес."
+                        else:
+                            reminder = (
+                                f"Через три дня заканчивается оплаченный месяц франшизы. "
+                                f"Продлите тариф ({price} ₽/мес) в разделе «Франшиза»."
+                            )
+                        await _notify(partner.owner_telegram_id, reminder)
                     if due > now:
                         continue
                     if not partner.franchise_payment_method_id:
@@ -159,7 +192,7 @@ async def process_franchise_billing(now: datetime | None = None) -> dict[str, in
                         await session.commit()
                         from app.bot.runtime import set_partner_billing_state
                         set_partner_billing_state(partner.id, "grace", partner.franchise_tier)
-                        await _notify(partner.owner_telegram_id, "Не удалось выполнить автосписание. Обновите способ оплаты в разделе «Франшиза». Даём 3 дня на оплату.")
+                        await _notify(partner.owner_telegram_id, "Оплаченный месяц франшизы закончился, а способ оплаты для автосписания не сохранён. Продлите тариф в разделе «Франшиза» — даём 3 дня, после этого бот будет приостановлен.")
                         continue
                     tier = partner.franchise_tier if partner.franchise_tier in TIER_PRICES else "basic"
                     invoice = f"hwls-franchise-{partner.id}-{tier}-{uuid.uuid4().hex[:10]}"

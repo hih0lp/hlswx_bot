@@ -31,7 +31,8 @@ def _is_admin(telegram_id: int) -> bool:
 
 
 @connect_router.message(F.text.in_({CONNECT_BTN, "🔌 Подключить"}))
-async def connect_entry(message: Message) -> None:
+async def connect_entry(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await connect_info(message)
 
 

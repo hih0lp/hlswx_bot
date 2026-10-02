@@ -95,6 +95,9 @@ def get_dispatcher() -> Dispatcher:
         from app.bot.tenant_middleware import PartnerScopeMiddleware
 
         _dp.update.outer_middleware(PartnerScopeMiddleware())
+        from app.bot.album_middleware import AlbumFirstOnlyMiddleware
+
+        _dp.message.outer_middleware(AlbumFirstOnlyMiddleware())
         _dp.include_router(menu_router)
         _dp.include_router(connect_router)
         _dp.include_router(whitelabel_apply_router)

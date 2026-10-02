@@ -14,23 +14,30 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from app.core.texts import (
     CORP_STEPS_TOTAL,
     CORP_TARIFF,
     ERR_BLOCKED,
     ERR_CATEGORY,
+    ERR_MYSUB_DELETE_ACTIVE,
+    ERR_MYSUB_NOT_FOUND,
+    ERR_MYSUB_RENEW_BLOCKED,
+    ERR_MYSUB_RENEW_FREE,
+    ERR_SUB_TEXT_ONLY,
     ERR_PAYMENT,
     MYSUB_BUTTON,
     MYSUB_CARD,
+    MYSUB_CARD_FINISHED,
+    MYSUB_DELETE_ASK,
+    MYSUB_DELETED,
     MYSUB_FINISHED,
     MYSUB_MARK_ACTIVE,
     MYSUB_MARK_FINISHED,
     MYSUB_UNTIL,
     MYSUBS_EMPTY,
     MYSUBS_HEADER,
-    PAYMENT_CTA,
     SUB_ACCEPTED,
     SUB_ACTIVATED,
     SUB_ANALYZING,
@@ -39,6 +46,8 @@ from app.core.texts import (
     SUB_STEP3,
     SUB_STEP3_CORP,
     SUB_STEP4,
+    SUB_RENEW,
+    SUB_RENEW_EARLY,
     SUB_STEP5,
     SUB_STEPS_TOTAL,
 )
@@ -53,6 +62,7 @@ from app.keyboards.main import (
     pay_button,
     payment_choice_keyboard,
     subscription_card_keyboard,
+    subscription_delete_keyboard,
     subscriptions_keyboard,
     volume_keyboard,
 )
@@ -67,12 +77,12 @@ from app.models.entities import (
 )
 from app.services import banners
 from app.services.fraud import text_fingerprint
-from app.services.media import read_ad_content
 from app.services.menu_nav import dispatch_menu_button
 from app.services.payments import (
     PaymentCreationError,
     activate_subscription_whitelist,
     create_subscription_payment,
+    payment_error_text,
 )
 from app.services.pricing import (
     PLAN_CORP_B2B,
@@ -116,7 +126,11 @@ def _placeholder_contact(from_user) -> str:
 # одну «Москву» (жалоба заказчика от 17.09.2026). Ограничения остались там,
 # где им место: в провижининге бесплатного доступа (`services/whitelist.py`).
 async def _available_cities(session) -> list[City]:
-    cities = (await session.scalars(select(City).where(City.active.is_(True)))).all()
+    # Город без единого активного чата в выбор не попадает: иначе пользователь
+    # проходит шаги 2–3 и упирается в «нет доступных чатов» только после выбора
+    # объёма публикаций.
+    has_chats = exists().where(Chat.city_id == City.id, Chat.active.is_(True))
+    cities = (await session.scalars(select(City).where(City.active.is_(True), has_chats))).all()
     return list(cities)
 
 
@@ -225,13 +239,12 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
     if await dispatch_menu_button(message, state):
         return
 
-    # Пример объявления принимаем и картинкой: текст для тарифа берём из
-    # подписи, а у фото без подписи — из OCR (правка заказчика от 17.09.2026).
-    content = await read_ad_content(message)
-    if content.empty:
-        await _error_screen(message, ERR_CATEGORY)
+    # Тариф определяется только по тексту (правка заказчика от 02.10.2026):
+    # фото принимается позже, при публикации по уже купленной подписке.
+    text = (message.text or "").strip()
+    if not text:
+        await _error_screen(message, ERR_SUB_TEXT_ONLY if not message.text else ERR_CATEGORY)
         return
-    text = content.text
 
     analyzing = await message.answer(SUB_ANALYZING)
     result = get_classifier().classify(text)
@@ -578,12 +591,12 @@ async def _finalize_subscription(
             _, url = await create_subscription_payment(
                 session, user.id, sub_id, total, f"Подписка HLSWX #{sub_id}",
             )
-    except PaymentCreationError:
+    except PaymentCreationError as exc:
         await state.clear()
         await banners.show_screen(
             message,
             banners.ATTENTION,
-            ERR_PAYMENT,
+            payment_error_text(exc, ERR_PAYMENT),
             inline_payment_failed(f"sub:pay:{sub_id}"),
             edit=edit,
         )
@@ -593,7 +606,7 @@ async def _finalize_subscription(
     await banners.show_screen(
         message,
         banners.AD,
-        screen + PAYMENT_CTA,
+        screen,
         pay_button(url, f"💳 Оплатить {format_rub(total)} ₽"),
         edit=edit,
     )
@@ -604,8 +617,13 @@ async def subscription_retry_payment(callback: CallbackQuery) -> None:
     """«💳 Повторить» с экрана «Не удалось провести оплату»."""
     sub_id = int(callback.data.split(":")[-1])
     async with SessionLocal() as session:
-        sub = await session.scalar(select(Subscription).where(Subscription.id == sub_id))
-        if not sub or sub.status != SubscriptionStatus.pending_payment:
+        sub = await session.scalar(
+            select(Subscription).where(Subscription.id == sub_id, Subscription.deleted_at.is_(None)),
+        )
+        # `expired` / `active` — повтор оплаты при продлении подписки.
+        if not sub or sub.status not in (
+            SubscriptionStatus.pending_payment, SubscriptionStatus.expired, SubscriptionStatus.active,
+        ):
             await callback.answer("Подписка не найдена или уже оплачена", show_alert=True)
             return
         await callback.answer()
@@ -614,11 +632,11 @@ async def subscription_retry_payment(callback: CallbackQuery) -> None:
             _, url = await create_subscription_payment(
                 session, sub.user_id, sub.id, total, f"Подписка HLSWX #{sub.id}",
             )
-        except PaymentCreationError:
+        except PaymentCreationError as exc:
             await banners.show_screen(
                 callback.message,
                 banners.ATTENTION,
-                ERR_PAYMENT,
+                payment_error_text(exc, ERR_PAYMENT),
                 inline_payment_failed(f"sub:pay:{sub_id}"),
                 edit=True,
             )
@@ -627,7 +645,7 @@ async def subscription_retry_payment(callback: CallbackQuery) -> None:
     await banners.show_screen(
         callback.message,
         banners.AD,
-        PAYMENT_CTA.strip(),
+        "<b>💳 Оплата подписки</b>",
         pay_button(url, f"💳 Оплатить {format_rub(total)} ₽"),
         edit=True,
     )
@@ -655,18 +673,28 @@ async def _subscription_city_and_chats(session, subscription_id: int) -> tuple[s
     return city_label, chats
 
 
-def _subscription_status_line(sub: Subscription) -> str:
+def _is_finished(sub: Subscription) -> bool:
     from datetime import UTC, datetime
 
     expired = not sub.expires_at or sub.expires_at <= datetime.now(UTC)
-    if expired or sub.status != SubscriptionStatus.active:
+    return expired or sub.status != SubscriptionStatus.active
+
+
+def _is_manageable(sub: Subscription) -> bool:
+    """Завершённую подписку можно продлить или удалить; заблокированную — нет."""
+    return _is_finished(sub) and sub.status in (SubscriptionStatus.active, SubscriptionStatus.expired)
+
+
+def _subscription_status_line(sub: Subscription) -> str:
+    if _is_finished(sub):
         return MYSUB_FINISHED.format(date=format_date(sub.expires_at))
     return MYSUB_UNTIL.format(date=format_date(sub.expires_at))
 
 
 @subscription_router.message(Command("mysubs"))
 @subscription_router.message(F.text.in_({"💳 Мои подписки", "📋 Мои подписки"}))
-async def mysubs_entry(message: Message) -> None:
+async def mysubs_entry(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await my_subscriptions(message)
 
 
@@ -681,6 +709,7 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
                 .where(
                     Subscription.user_id == user.id,
                     Subscription.status != SubscriptionStatus.pending_payment,
+                    Subscription.deleted_at.is_(None),
                 )
                 .order_by(Subscription.id.desc()),
             )
@@ -706,8 +735,12 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
                 ),
             ))
 
+    # Список открывают и из карточки подписки (она без баннера), поэтому при
+    # клике покинутую карточку не оставляем в переписке — `replace=edit`.
     if not items:
-        await banners.show_screen(message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_back_home_row(), edit=edit)
+        await banners.show_screen(
+            message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_back_home_row(), edit=edit, replace=edit,
+        )
         return
 
     from app.services.welcome import subscriptions_status_text
@@ -718,6 +751,7 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
         MYSUBS_HEADER.format(status=subscriptions_status_text(active, finished)),
         subscriptions_keyboard(items, page=page),
         edit=edit,
+        replace=edit,
     )
 
 
@@ -735,22 +769,213 @@ async def subscription_card(callback: CallbackQuery) -> None:
     sub_id = int(callback.data.split(":")[-1])
     async with SessionLocal() as session:
         user = await get_or_create_user(session, callback.from_user)
-        sub = await session.scalar(select(Subscription).where(Subscription.id == sub_id))
+        sub = await session.scalar(
+            select(Subscription).where(Subscription.id == sub_id, Subscription.deleted_at.is_(None)),
+        )
         if not sub or sub.user_id != user.id:
-            await callback.answer("Подписка не найдена", show_alert=True)
+            await callback.answer(ERR_MYSUB_NOT_FOUND, show_alert=True)
             return
         city_label, chats = await _subscription_city_and_chats(session, sub.id)
 
+    finished = _is_finished(sub)
+    # У завершённой подписки в макете (кадр 146:111) — «Завершилась 27.08.2026».
+    status = MYSUB_CARD_FINISHED.format(date=format_date(sub.expires_at)) if finished else _subscription_status_line(sub)
+
     await callback.answer()
+    # В кадрах «Моя подписка» и «Удаление подписки» баннера нет: карточка —
+    # просто текст. Покинутый экран со списком (он с баннером) убираем, а не
+    # оставляем в чате (`replace=True`).
     await banners.show_screen(
         callback.message,
-        banners.SUBSCRIPTION,
+        banners.PLAIN,
         MYSUB_CARD.format(
-            status=_subscription_status_line(sub),
+            status=status,
             city=city_label,
             chats=chats_label(len(chats)),
             price=format_rub(int(sub.total_price)),
         ),
-        subscription_card_keyboard(chats),
+        subscription_card_keyboard(
+            chats,
+            sub_id=sub.id,
+            manageable=_is_manageable(sub),
+        ),
         edit=True,
+        replace=True,
     )
+
+
+async def _own_manageable_subscription(session, callback: CallbackQuery, sub_id: int, *, alert: str):
+    """Подписка текущего пользователя, которую можно продлить/удалить; иначе — alert и None."""
+    user = await get_or_create_user(session, callback.from_user)
+    sub = await session.scalar(
+        select(Subscription).where(
+            Subscription.id == sub_id,
+            Subscription.user_id == user.id,
+            Subscription.deleted_at.is_(None),
+        ),
+    )
+    if not sub:
+        await callback.answer(ERR_MYSUB_NOT_FOUND, show_alert=True)
+        return None, user
+    if not _is_manageable(sub):
+        await callback.answer(alert, show_alert=True)
+        return None, user
+    return sub, user
+
+
+async def _subscription_city_key(session, chats) -> str:
+    """Ключ города подписки — по её чатам (в подписке все чаты одного города)."""
+    for chat in chats:
+        city = await session.scalar(select(City).where(City.id == chat.city_id))
+        if city:
+            return city.key
+    return ""
+
+
+@subscription_router.callback_query(F.data.startswith("sub:renew:"))
+async def subscription_renew(callback: CallbackQuery) -> None:
+    """«🔄 Продлить»: та же подписка на новый период — с её городом, чатами, объёмом и ценой.
+
+    Ничего не выбирается заново. Завершённая подписка продлевается от сегодняшнего
+    дня, действующая (кнопка из напоминания за сутки) — от даты окончания.
+    Бесплатная (белый список) продлевается бесплатно, пока у человека есть доступ
+    к этому городу и чатам; иначе берётся запомненная цена за чат, а если её нет
+    (подписку выдали бесплатно) — предлагаем оформить платную.
+    """
+    sub_id = int(callback.data.split(":")[-1])
+    try:
+        async with SessionLocal() as session:
+            user = await get_or_create_user(session, callback.from_user)
+            sub = await session.scalar(
+                select(Subscription).where(
+                    Subscription.id == sub_id,
+                    Subscription.user_id == user.id,
+                    Subscription.deleted_at.is_(None),
+                ),
+            )
+            if not sub:
+                await callback.answer(ERR_MYSUB_NOT_FOUND, show_alert=True)
+                return
+            if sub.status not in (SubscriptionStatus.active, SubscriptionStatus.expired) or not sub.expires_at:
+                await callback.answer(ERR_MYSUB_RENEW_BLOCKED, show_alert=True)
+                return
+
+            finished = _is_finished(sub)
+            if finished and sub.status == SubscriptionStatus.active:
+                # Срок вышел, а фоновый воркер ещё не перевёл подписку в «завершена».
+                sub.status = SubscriptionStatus.expired
+                await session.commit()
+
+            city_label, chats = await _subscription_city_and_chats(session, sub.id)
+            summary = _summary(city_label, len(chats), sub.posts_volume)
+            total = int(sub.total_price)
+
+            if total <= 0:
+                city_key = await _subscription_city_key(session, chats)
+                whitelisted, _ = await is_user_whitelisted_for_city(
+                    session,
+                    callback.from_user.id,
+                    city_key,
+                    [chat.id for chat in chats],
+                    username=callback.from_user.username,
+                )
+                if whitelisted:
+                    await callback.answer()
+                    await activate_subscription_whitelist(session, user.id, sub.id)
+                    await banners.show_screen(
+                        callback.message,
+                        banners.SUBSCRIPTION,
+                        SUB_ACTIVATED.format(**summary),
+                        inline_back_home_row(),
+                        edit=True,
+                        replace=True,
+                    )
+                    return
+                # Доступ закончился: платим запомненную цену за чат, если она есть.
+                per_chat = int(sub.price_per_chat or 0)
+                if per_chat <= 0:
+                    await callback.answer(ERR_MYSUB_RENEW_FREE, show_alert=True)
+                    return
+                total = per_chat * max(len(chats), 1)
+                sub.total_price = total
+                await session.commit()
+
+            screen = (SUB_RENEW if finished else SUB_RENEW_EARLY).format(price=format_rub(total), **summary)
+            await session.refresh(user)
+            balance = user.balance or Decimal("0")
+            await callback.answer()
+
+            if balance >= total:
+                await banners.show_screen(
+                    callback.message,
+                    banners.AD,
+                    screen,
+                    payment_choice_keyboard("sub", sub.id, total, balance),
+                    edit=True,
+                    replace=True,
+                )
+                return
+
+            _, url = await create_subscription_payment(
+                session, user.id, sub.id, total, f"Продление подписки HLSWX #{sub.id}",
+            )
+    except PaymentCreationError as exc:
+        await banners.show_screen(
+            callback.message,
+            banners.ATTENTION,
+            payment_error_text(exc, ERR_PAYMENT),
+            inline_payment_failed(f"sub:pay:{sub_id}"),
+            edit=True,
+            replace=True,
+        )
+        return
+
+    await banners.show_screen(
+        callback.message,
+        banners.AD,
+        screen,
+        pay_button(url, f"💳 Оплатить {format_rub(total)} ₽"),
+        edit=True,
+        replace=True,
+    )
+
+
+@subscription_router.callback_query(F.data.startswith("sub:del:"))
+async def subscription_delete_ask(callback: CallbackQuery) -> None:
+    """«🗑 Удалить» на карточке: кадр «Удаление подписки» с подтверждением."""
+    sub_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        sub, _ = await _own_manageable_subscription(
+            session, callback, sub_id, alert=ERR_MYSUB_DELETE_ACTIVE,
+        )
+    if sub is None:
+        return
+    await callback.answer()
+    await banners.show_screen(
+        callback.message,
+        banners.PLAIN,
+        MYSUB_DELETE_ASK,
+        subscription_delete_keyboard(sub_id),
+        edit=True,
+        replace=True,
+    )
+
+
+@subscription_router.callback_query(F.data.startswith("sub:delok:"))
+async def subscription_delete(callback: CallbackQuery) -> None:
+    """«🗑 Удалить» на подтверждении: подписка скрывается из «Моих подписок»."""
+    from datetime import UTC, datetime
+
+    sub_id = int(callback.data.split(":")[-1])
+    async with SessionLocal() as session:
+        sub, _ = await _own_manageable_subscription(
+            session, callback, sub_id, alert=ERR_MYSUB_DELETE_ACTIVE,
+        )
+        if sub is None:
+            return
+        # Мягкое удаление: платежи и публикации ссылаются на подписку и нужны
+        # для отчётности, поэтому строка остаётся, просто пропадает у пользователя.
+        sub.deleted_at = datetime.now(UTC)
+        await session.commit()
+    await callback.answer(MYSUB_DELETED)
+    await my_subscriptions(callback.message, tg_user=callback.from_user, edit=True)

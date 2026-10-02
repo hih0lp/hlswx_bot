@@ -132,6 +132,9 @@ class Subscription(TenantScoped, Base):
     # и само сообщение «Подписка закончилась». Нужны, чтобы не отправить дважды.
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Мягкое удаление: завершённую подписку пользователь убирает из «Моих
+    # подписок» (макет «Удаление подписки»), но платежи и публикации остаются.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

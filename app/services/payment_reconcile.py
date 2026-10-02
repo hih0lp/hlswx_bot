@@ -131,6 +131,14 @@ async def reconcile_pending_payments() -> int:
                     from app.services.franchise_billing import prompt_for_bot_token
                     await prompt_for_bot_token(partner)
             else:
-                await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
+                # Клиенту пишет бот его клона: get_bot() берёт тенанта из
+                # контекста, а воркер сверки работает вне тенанта.
+                try:
+                    with partner_scope(payment.partner_id):
+                        await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
+                except Exception:
+                    # Оплата уже проведена; сбой уведомления (бот клона не
+                    # запущен и т.п.) не должен обрывать сверку остальных платежей.
+                    logger.exception("Could not notify user after reconciliation payment=%s", payment.id)
 
     return processed
