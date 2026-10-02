@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import func, select
 
-from app.services.textfmt import to_local
-from app.db.session import SessionLocal
-from app.models.entities import WhitelabelApplication, WhitelabelApplicationStatus
 from app.services import access
 
 logger = logging.getLogger("admin")
@@ -59,31 +55,3 @@ async def leave_flow_if_escaped(message, state) -> bool:
         await show_panel(message)
         return True
     return await dispatch_menu_button(message, state)
-
-
-async def _wl_pending_count() -> int:
-    async with SessionLocal() as session:
-        return await session.scalar(
-            select(func.count())
-            .select_from(WhitelabelApplication)
-            .where(WhitelabelApplication.status == WhitelabelApplicationStatus.pending),
-        ) or 0
-
-
-def _format_wl_application(app: WhitelabelApplication) -> str:
-    status_map = {
-        WhitelabelApplicationStatus.pending: "⏳ ожидает",
-        WhitelabelApplicationStatus.approved: "✅ одобрена",
-        WhitelabelApplicationStatus.rejected: "❌ отклонена",
-    }
-    uname = f"@{app.username}" if app.username else "—"
-    bot_line = f"\nБот: @{app.planned_bot_username}" if app.planned_bot_username else ""
-    comment = f"\n\n💬 {app.comment}" if app.comment else ""
-    note = f"\n\n<i>Админ: {app.admin_note}</i>" if app.admin_note else ""
-    created = f"{to_local(app.created_at):%d.%m.%Y %H:%M}" if app.created_at else "—"
-    return (
-        f"<b>📝 Заявка #{app.id}</b> — {status_map.get(app.status, app.status.value)}\n"
-        f"От: {uname}\nID: <code>{app.telegram_id}</code>\n"
-        f"Бренд: <b>{app.brand_title}</b>{bot_line}{comment}{note}\n\n"
-        f"Создана: {created}"
-    )

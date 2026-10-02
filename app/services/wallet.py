@@ -16,19 +16,21 @@ class InsufficientBalanceError(Exception):
 
 
 def format_rub(amount: Decimal | int | float) -> str:
-    value = int(Decimal(str(amount)))
-    return f"{value:,}".replace(",", " ")
+    value = Decimal(str(amount))
+    if value == value.to_integral_value():
+        return f"{int(value):,}".replace(",", " ")
+    return f"{value:,.2f}".replace(",", " ").replace(".", ",")
 
 
-def parse_amount_text(raw: str | None) -> int | None:
+def parse_amount_text(raw: str | None) -> Decimal | None:
     if not raw:
         return None
-    cleaned = re.sub(r"[^\d]", "", raw.strip())
-    if not cleaned:
+    cleaned = re.sub(r"\s+", "", raw.strip()).replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", cleaned):
         return None
     try:
-        value = int(cleaned)
-    except ValueError:
+        value = Decimal(cleaned).quantize(Decimal("0.01"))
+    except Exception:
         return None
     return value if value > 0 else None
 

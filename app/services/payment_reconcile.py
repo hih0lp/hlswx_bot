@@ -7,9 +7,10 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.models.entities import Payment, PaymentStatus
+from app.models.entities import Payment, PaymentStatus, WhitelabelPartner
 from app.services.notifications import notify_payment_success
-from app.services.payments import mark_payment_succeeded
+from app.services.payments import mark_payment_succeeded, payment_provider_for_partner
+from app.services.tenant import partner_scope
 from app.services.yookassa import YooKassaService
 
 logger = logging.getLogger("payment_reconcile")
@@ -52,8 +53,6 @@ async def reconcile_pending_payments() -> int:
 
     since = datetime.now(UTC) - STALE_AFTER
     processed = 0
-    yk = YooKassaService(settings)
-
     async with SessionLocal() as session:
         payments = (
             await session.scalars(
@@ -64,12 +63,14 @@ async def reconcile_pending_payments() -> int:
                     Payment.created_at >= since,
                 )
                 .order_by(Payment.id.desc())
-                .limit(15),
+                .limit(100)
+                .execution_options(skip_partner_scope=True),
             )
         ).all()
 
         for payment in payments:
             try:
+                yk = await payment_provider_for_partner(settings, payment.partner_id)
                 remote = await yk.get_payment(payment.provider_payment_id)
             except Exception:
                 logger.exception("Reconcile check failed for payment %s", payment.id)
@@ -78,12 +79,58 @@ async def reconcile_pending_payments() -> int:
                 continue
             if payment.status == PaymentStatus.succeeded:
                 continue
-            result = await mark_payment_succeeded(session, payment)
+            with partner_scope(payment.partner_id):
+                scoped_payment = await session.scalar(select(Payment).where(Payment.id == payment.id))
+                if not scoped_payment or scoped_payment.status != PaymentStatus.pending:
+                    continue
+                result = await mark_payment_succeeded(session, scoped_payment)
             processed += 1
             purpose_id = payment.purpose_id
             user_id = payment.user_id
             topup_amount = payment.amount if payment.purpose == "topup" else None
             logger.info("Reconciled payment %s -> %s", payment.id, result)
-            await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
+            if result == "franchise_activated":
+                partner = await session.scalar(
+                    select(WhitelabelPartner)
+                    .where(WhitelabelPartner.id == purpose_id)
+                    .execution_options(skip_partner_scope=True)
+                )
+                if partner:
+                    from app.bot.runtime import request_partner_bots_reload, set_partner_billing_state
+
+                    set_partner_billing_state(
+                        partner.id,
+                        partner.franchise_billing_status,
+                        partner.franchise_tier,
+                    )
+                    # Reconciliation is the fallback when the test webhook URL
+                    # is unreachable; activation must still start the new clone.
+                    request_partner_bots_reload()
+                    if partner.owner_telegram_id:
+                        from app.bot.runtime import _get_main_bot
+
+                        note = (
+                            "Оплата франшизы прошла. Автопродление подключено."
+                            if partner.franchise_payment_method_id
+                            else "Оплата франшизы прошла. Автопродление не включилось: ЮKassa не сохранила способ оплаты."
+                        )
+                        try:
+                            await _get_main_bot().send_message(partner.owner_telegram_id, note)
+                        except Exception:
+                            logger.exception(
+                                "Could not notify franchise owner after reconciliation partner_id=%s",
+                                partner.id,
+                            )
+            elif result == "franchise_awaiting_token":
+                partner = await session.scalar(
+                    select(WhitelabelPartner)
+                    .where(WhitelabelPartner.id == purpose_id)
+                    .execution_options(skip_partner_scope=True)
+                )
+                if partner:
+                    from app.services.franchise_billing import prompt_for_bot_token
+                    await prompt_for_bot_token(partner)
+            else:
+                await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
 
     return processed

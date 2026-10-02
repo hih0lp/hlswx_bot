@@ -62,35 +62,73 @@ async def yookassa_webhook(request: Request) -> dict:
 
     if event not in {"payment.succeeded", "payment.waiting_for_capture"}:
         return {"status": "ignored"}
-
-    status = obj.get("status")
-    if status != "succeeded":
+    if obj.get("status") != "succeeded":
         return {"status": "pending"}
 
+    # Payment notifications do not carry tenant context. Resolve the owning tenant
+    # explicitly, then process all related rows within that tenant.
+    from app.services.tenant import partner_scope
+
     async with SessionLocal() as session:
-        payment = await session.scalar(select(Payment).where(Payment.provider_payment_id == provider_id))
+        payment = await session.scalar(
+            select(Payment)
+            .where(Payment.provider_payment_id == provider_id)
+            .execution_options(skip_partner_scope=True)
+        )
         if not payment:
             invoice = (obj.get("metadata") or {}).get("invoice_id")
             if invoice:
-                payment = await session.scalar(select(Payment).where(Payment.invoice_id == invoice))
+                payment = await session.scalar(
+                    select(Payment)
+                    .where(Payment.invoice_id == invoice)
+                    .execution_options(skip_partner_scope=True)
+                )
         if not payment:
             logger.warning("Payment not found for provider_id=%s", provider_id)
             return {"status": "not_found"}
-        if payment.status == PaymentStatus.succeeded:
-            return {"status": "already_processed"}
 
-        yk = YooKassaService(request.app.state.settings)
-        remote = await yk.get_payment(provider_id)
-        if YooKassaService.payment_status(remote) != "succeeded":
-            return {"status": "not_succeeded"}
+        partner_id = payment.partner_id
+        with partner_scope(partner_id):
+            # Re-load under tenant criteria so updates and relationships stay scoped.
+            payment = await session.scalar(select(Payment).where(Payment.id == payment.id))
+            if not payment:
+                return {"status": "not_found"}
+            if payment.status == PaymentStatus.succeeded:
+                return {"status": "already_processed"}
 
-        result = await mark_payment_succeeded(session, payment)
-        user_id = payment.user_id
-        purpose_id = payment.purpose_id
-        topup_amount = payment.amount if payment.purpose == "topup" else None
-        logger.info("Payment processed %s -> %s", payment.id, result)
+            from app.services.payments import payment_provider_for_partner
+            yk = await payment_provider_for_partner(request.app.state.settings, partner_id)
+            remote = await yk.get_payment(provider_id)
+            if YooKassaService.payment_status(remote) != "succeeded":
+                return {"status": "not_succeeded"}
 
-    await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
+            remote_method = remote.get("payment_method") or {}
+            if payment.save_payment_method and remote_method.get("saved"):
+                payment.payment_method_id = remote_method.get("id")
+            result = await mark_payment_succeeded(session, payment)
+            user_id = payment.user_id
+            purpose_id = payment.purpose_id
+            topup_amount = payment.amount if payment.purpose == "topup" else None
+            logger.info("Payment processed %s -> %s", payment.id, result)
+
+        with partner_scope(partner_id):
+            if result == "franchise_activated":
+                from app.bot.runtime import _get_main_bot
+                partner = await session.scalar(select(WhitelabelPartner).where(WhitelabelPartner.id == purpose_id).execution_options(skip_partner_scope=True))
+                if partner:
+                    from app.bot.runtime import request_partner_bots_reload, set_partner_billing_state
+                    set_partner_billing_state(partner.id, partner.franchise_billing_status, partner.franchise_tier)
+                    request_partner_bots_reload()
+                    if partner.owner_telegram_id:
+                        note = "Оплата франшизы прошла. Автопродление подключено." if partner.franchise_payment_method_id else "Оплата франшизы прошла. Автопродление не включилось: ЮKassa не сохранила способ оплаты."
+                        await _get_main_bot().send_message(partner.owner_telegram_id, note)
+            elif result == "franchise_awaiting_token":
+                partner = await session.scalar(select(WhitelabelPartner).where(WhitelabelPartner.id == purpose_id).execution_options(skip_partner_scope=True))
+                if partner:
+                    from app.services.franchise_billing import prompt_for_bot_token
+                    await prompt_for_bot_token(partner)
+            else:
+                await notify_payment_success(user_id, result, purpose_id, amount=topup_amount)
     return {"status": "ok"}
 
 
@@ -176,30 +214,37 @@ async def b2b_publish(token: str, request: Request) -> JSONResponse:
     if not text:
         return JSONResponse({"ok": False, "error": "text_required"}, status_code=400)
 
+    # Token lookup is a capability resolution: it yields exactly one tenant,
+    # after which all subscription, limit and queue work is strictly scoped.
+    from app.services.tenant import partner_scope
+    from app.models.entities import B2bIntegration, Subscription
+    from app.services.volume_limits import check_volume_allowed
+
     async with SessionLocal() as session:
         integration = await integration_for_token(session, token)
-        if not integration or not await integration_is_live(session, integration):
+        if not integration:
             return JSONResponse({"ok": False, "error": "subscription_inactive"}, status_code=403)
-        if not integration.subscription_id:
-            return JSONResponse({"ok": False, "error": "no_subscription"}, status_code=403)
-        from app.models.entities import Subscription
-        from app.services.volume_limits import check_volume_allowed
-
-        sub = await session.scalar(select(Subscription).where(Subscription.id == integration.subscription_id))
-        if not sub:
-            return JSONResponse({"ok": False, "error": "no_subscription"}, status_code=403)
-        allowed, _ = await check_volume_allowed(session, sub.id, sub.posts_volume or "low")
-        if not allowed:
-            return JSONResponse({"ok": False, "error": "daily_limit_exceeded"}, status_code=429)
-        count = await enqueue_subscription_post(
-            session,
-            integration.subscription_id,
-            text,
-            contact or "—",
-            photo_url=photo_url,
-        )
-        if count == 0:
-            return JSONResponse({"ok": False, "error": "whitelist_or_scope_denied"}, status_code=403)
+        tenant_id = integration.partner_id
+        integration_id = integration.id
+        with partner_scope(tenant_id):
+            integration = await session.scalar(
+                select(B2bIntegration).where(B2bIntegration.id == integration_id)
+            )
+            if not integration or not await integration_is_live(session, integration):
+                return JSONResponse({"ok": False, "error": "subscription_inactive"}, status_code=403)
+            if not integration.subscription_id:
+                return JSONResponse({"ok": False, "error": "no_subscription"}, status_code=403)
+            sub = await session.scalar(select(Subscription).where(Subscription.id == integration.subscription_id))
+            if not sub:
+                return JSONResponse({"ok": False, "error": "no_subscription"}, status_code=403)
+            allowed, _ = await check_volume_allowed(session, sub.id, sub.posts_volume or "low")
+            if not allowed:
+                return JSONResponse({"ok": False, "error": "daily_limit_exceeded"}, status_code=429)
+            count = await enqueue_subscription_post(
+                session, integration.subscription_id, text, contact or "—", photo_url=photo_url,
+            )
+            if count == 0:
+                return JSONResponse({"ok": False, "error": "whitelist_or_scope_denied"}, status_code=403)
 
     return JSONResponse({"ok": True, "queued_chats": count, "photo": bool(photo_url)})
 
@@ -230,45 +275,48 @@ async def wl_publish(request: Request) -> JSONResponse:
                 WhitelabelPartner.active.is_(True),
             ),
         )
-        if not partner:
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    if not partner:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
 
-        from app.models.entities import Subscription, User
-        from app.services.b2b import get_active_corp_subscription
-        from app.services.volume_limits import check_volume_allowed
+    from app.models.entities import Subscription, User
+    from app.services.b2b import get_active_corp_subscription
+    from app.services.tenant import partner_scope
+    from app.services.volume_limits import check_volume_allowed
 
-        user = None
-        if partner.linked_user_id:
-            user = await session.scalar(select(User).where(User.id == partner.linked_user_id))
-        elif partner.owner_telegram_id:
-            user = await session.scalar(select(User).where(User.telegram_id == partner.owner_telegram_id))
-
-        if not user:
-            return JSONResponse({"ok": False, "error": "partner_user_not_linked"}, status_code=403)
-
-        sub = await get_active_corp_subscription(session, user.id)
-        if not sub:
-            sub = await session.scalar(
-                select(Subscription)
-                .where(
-                    Subscription.user_id == user.id,
-                    Subscription.status == SubscriptionStatus.active,
+    with partner_scope(partner.id, partner.owner_telegram_id, getattr(partner, "franchise_tier", "")):
+        async with SessionLocal() as session:
+            user = None
+            if partner.owner_telegram_id:
+                user = await session.scalar(
+                    select(User).where(User.telegram_id == partner.owner_telegram_id),
                 )
-                .order_by(Subscription.id.desc()),
+            if not user:
+                return JSONResponse({"ok": False, "error": "partner_user_not_linked"}, status_code=403)
+
+            sub = await get_active_corp_subscription(session, user.id)
+            if not sub:
+                sub = await session.scalar(
+                    select(Subscription)
+                    .where(
+                        Subscription.user_id == user.id,
+                        Subscription.status == SubscriptionStatus.active,
+                    )
+                    .order_by(Subscription.id.desc()),
+                )
+            if not sub:
+                return JSONResponse({"ok": False, "error": "subscription_inactive"}, status_code=403)
+
+            allowed, _ = await check_volume_allowed(session, sub.id, sub.posts_volume or "low")
+            if not allowed:
+                return JSONResponse({"ok": False, "error": "daily_limit_exceeded"}, status_code=429)
+
+            count = await enqueue_subscription_post(
+                session, sub.id, text, contact or "—", photo_url=photo_url,
             )
-        if not sub:
-            return JSONResponse({"ok": False, "error": "subscription_inactive"}, status_code=403)
+            if count == 0:
+                return JSONResponse({"ok": False, "error": "whitelist_or_scope_denied"}, status_code=403)
 
-        allowed, _ = await check_volume_allowed(session, sub.id, sub.posts_volume or "low")
-        if not allowed:
-            return JSONResponse({"ok": False, "error": "daily_limit_exceeded"}, status_code=429)
-
-        count = await enqueue_subscription_post(session, sub.id, text, contact or "—", photo_url=photo_url)
-        if count == 0:
-            return JSONResponse({"ok": False, "error": "whitelist_or_scope_denied"}, status_code=403)
-        partner_username = partner.bot_username
-
-    return JSONResponse({"ok": True, "queued_chats": count, "partner": partner_username, "photo": bool(photo_url)})
+    return JSONResponse({"ok": True, "queued_chats": count, "partner": partner.bot_username, "photo": bool(photo_url)})
 
 
 @api_router.post("/api/ml/classify")

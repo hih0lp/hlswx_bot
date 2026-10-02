@@ -15,10 +15,12 @@ from app.models.entities import (
     PaymentStatus,
     Subscription,
     SubscriptionStatus,
+    WhitelabelPartner,
 )
 from app.services.fraud import subscription_period
 from app.services.wallet import InsufficientBalanceError, get_user_for_update
 from app.services.yookassa import YooKassaService
+from app.services.tenant import current_partner_id
 
 logger = logging.getLogger("payments")
 
@@ -40,6 +42,44 @@ CASH_IN_PREFIXES = (INVOICE_SUB, INVOICE_PKG, INVOICE_TOPUP, INVOICE_STARS)
 
 class PaymentCreationError(Exception):
     """YooKassa or payment setup failed."""
+
+
+async def payment_provider_for_partner(settings, partner_id: int) -> YooKassaService:
+    """Build an isolated YooKassa client for a tenant (ТЗ 6.6).
+
+    Партнёр вводит свои реквизиты сам через бота («Франшиза → Платёжные
+    реквизиты»); они хранятся в `whitelabel_partners.yookassa_shop_id` /
+    `yookassa_secret_key`. Переменные окружения `YOOKASSA_PARTNER_<id>_*`
+    остаются запасным путём — для партнёров, подключённых вручную до того,
+    как это поле появилось в боте.
+    """
+    if not partner_id:
+        return YooKassaService(settings)
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        partner = await session.scalar(
+            select(WhitelabelPartner)
+            .where(WhitelabelPartner.id == partner_id)
+            .execution_options(skip_partner_scope=True)
+        )
+    shop_id = ((partner.yookassa_shop_id if partner else None) or "").strip()
+    secret_key = ((partner.yookassa_secret_key if partner else None) or "").strip()
+    if not shop_id or not secret_key:
+        import os
+        prefix = f"YOOKASSA_PARTNER_{partner_id}_"
+        shop_id = os.getenv(prefix + "SHOP_ID", "").strip()
+        secret_key = os.getenv(prefix + "SECRET_KEY", "").strip()
+    if not shop_id or not secret_key:
+        raise PaymentCreationError("Partner YooKassa shop credentials are not configured")
+    return YooKassaService(settings.model_copy(update={
+        "yookassa_shop_id": shop_id,
+        "yookassa_secret_key": secret_key,
+    }))
+
+
+async def _tenant_payment_provider(settings) -> YooKassaService:
+    return await payment_provider_for_partner(settings, current_partner_id())
 
 
 async def activate_subscription(session: AsyncSession, subscription_id: int) -> bool:
@@ -68,7 +108,7 @@ async def create_subscription_payment(
     amount: int,
     description: str,
 ) -> tuple[Payment, str]:
-    yk = YooKassaService(get_settings())
+    yk = await _tenant_payment_provider(get_settings())
     invoice_id = f"hwls-sub-{subscription_id}-{uuid.uuid4().hex[:8]}"
     payment_row = Payment(
         user_id=user_id,
@@ -109,7 +149,7 @@ async def create_package_payment(
     amount: int,
     description: str,
 ) -> tuple[Payment, str]:
-    yk = YooKassaService(get_settings())
+    yk = await _tenant_payment_provider(get_settings())
     invoice_id = f"hwls-pkg-{order_id}-{uuid.uuid4().hex[:8]}"
     payment_row = Payment(
         user_id=user_id,
@@ -146,13 +186,14 @@ async def create_package_payment(
 async def create_topup_payment(
     session: AsyncSession,
     user_id: int,
-    amount: int,
+    amount: Decimal | int,
 ) -> tuple[Payment, str]:
-    yk = YooKassaService(get_settings())
+    amount = Decimal(amount).quantize(Decimal("0.01"))
+    yk = await _tenant_payment_provider(get_settings())
     invoice_id = f"hwls-topup-{user_id}-{uuid.uuid4().hex[:8]}"
     payment_row = Payment(
         user_id=user_id,
-        amount=Decimal(amount),
+        amount=amount,
         purpose="topup",
         purpose_id=user_id,
         invoice_id=invoice_id,
@@ -163,8 +204,8 @@ async def create_topup_payment(
 
     try:
         data = await yk.create_payment(
-            Decimal(amount),
-            f"HWLS пополнение баланса {amount} ₽",
+            amount,
+            f"HWLS пополнение баланса {amount:.2f} ₽",
             {"purpose": "topup", "purpose_id": str(user_id), "invoice_id": invoice_id},
             idempotence_key=invoice_id,
         )
@@ -292,6 +333,33 @@ async def mark_payment_succeeded(session: AsyncSession, payment: Payment) -> str
         await on_corp_subscription_activated(session, payment.user_id, payment.purpose_id)
         await session.commit()
         return "subscription_activated"
+
+    if payment.purpose == "franchise":
+        partner = await session.scalar(select(WhitelabelPartner).where(WhitelabelPartner.id == payment.purpose_id))
+        if not partner:
+            await session.commit()
+            return "franchise_partner_missing"
+        tier = payment.invoice_id.split("-")[-2]
+        if tier not in {"basic", "standard", "premium"}:
+            tier = "basic"
+        from app.services.franchise_billing import _next_month
+        partner.franchise_tier = tier
+        if payment.payment_method_id and payment.save_payment_method:
+            partner.franchise_payment_method_id = payment.payment_method_id
+        partner.franchise_next_charge_at = _next_month(datetime.now(UTC))
+        partner.franchise_grace_until = None
+        partner.franchise_last_notice_at = None
+        if partner.bot_username is None:
+            # First-ever payment for this partner: the clone bot doesn't exist
+            # yet (ТЗ «Оплата -> Создание бота») — nothing to launch, the owner
+            # still has to send a @BotFather token.
+            partner.franchise_billing_status = "awaiting_token"
+            await session.commit()
+            return "franchise_awaiting_token"
+        partner.active = True
+        partner.franchise_billing_status = "active" if partner.franchise_payment_method_id else "manual"
+        await session.commit()
+        return "franchise_activated"
 
     if payment.purpose == "package":
         activated = await activate_package(session, payment.purpose_id)

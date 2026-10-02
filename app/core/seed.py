@@ -61,6 +61,9 @@ async def ensure_schema() -> None:
     """Лёгкие обновления схемы без Alembic."""
     async with engine.begin() as conn:
         await conn.execute(
+            text("ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS yookassa_account_id VARCHAR(64)"),
+        )
+        await conn.execute(
             text("ALTER TABLE publish_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"),
         )
         await conn.execute(
@@ -123,6 +126,15 @@ async def ensure_schema() -> None:
                 "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS linked_user_id INTEGER REFERENCES users(id)",
             ),
         )
+        for stmt in (
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_tier VARCHAR(16) NOT NULL DEFAULT 'basic'",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_billing_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_payment_method_id VARCHAR(64)",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_next_charge_at TIMESTAMPTZ",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_grace_until TIMESTAMPTZ",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS franchise_last_notice_at TIMESTAMPTZ",
+        ):
+            await conn.execute(text(stmt))
         await conn.execute(
             text(
                 "UPDATE subscriptions SET plan_type = 'corp_b2b' "
@@ -160,8 +172,62 @@ async def ensure_schema() -> None:
             # Срок действия записи белого списка и индекс под выручку за период
             "ALTER TABLE whitelist_entries ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS ix_payments_status_paid ON payments (status, paid_at)",
+            # Оплата франшизы теперь идёт до создания бота (ТЗ «Оплата -> Создание
+            # бота»): имя бота и api_key ещё не известны в момент оплаты.
+            "ALTER TABLE whitelabel_partners ALTER COLUMN bot_username DROP NOT NULL",
+            "ALTER TABLE whitelabel_partners ALTER COLUMN api_key DROP NOT NULL",
+            # Партнёр сам вводит свои реквизиты ЮKassa через бота (ТЗ 6.6).
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS yookassa_shop_id VARCHAR(64)",
+            "ALTER TABLE whitelabel_partners ADD COLUMN IF NOT EXISTS yookassa_secret_key TEXT",
         ):
             await conn.execute(text(stmt))
+
+        # Tenant isolation: legacy rows remain in the primary bot's tenant (0).
+        tenant_tables = (
+            "users", "saved_contacts", "cities", "chats", "classification_logs", "subscriptions",
+            "subscription_chats", "package_orders", "payments", "publications",
+            "publish_jobs", "subscription_publication_logs", "whitelist_entries",
+            "b2b_integrations", "chat_publish_locks", "oneshot_events",
+            "publish_events", "admin_access", "app_settings",
+            "tariff_categories", "admin_audit_log",
+        )
+        for table in tenant_tables:
+            await conn.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS partner_id INTEGER NOT NULL DEFAULT 0"
+            ))
+            await conn.execute(text(
+                f"ALTER TABLE {table} ALTER COLUMN partner_id SET DEFAULT 0"
+            ))
+            await conn.execute(text(
+                f"ALTER TABLE {table} ALTER COLUMN partner_id SET NOT NULL"
+            ))
+            await conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_partner_id ON {table} (partner_id)"
+            ))
+
+        # Replace global uniqueness with tenant-local identity constraints.
+        for stmt in (
+            "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_telegram_id_key",
+            "DROP INDEX IF EXISTS ix_users_telegram_id",
+            "ALTER TABLE cities DROP CONSTRAINT IF EXISTS cities_key_key",
+            "DROP INDEX IF EXISTS ix_cities_key",
+            "ALTER TABLE whitelist_entries DROP CONSTRAINT IF EXISTS whitelist_entries_telegram_id_key",
+            "DROP INDEX IF EXISTS ix_whitelist_entries_telegram_id",
+            "ALTER TABLE admin_access DROP CONSTRAINT IF EXISTS admin_access_telegram_id_key",
+            "DROP INDEX IF EXISTS ix_admin_access_telegram_id",
+            "ALTER TABLE oneshot_events DROP CONSTRAINT IF EXISTS uq_oneshot_event",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_partner_telegram ON users (partner_id, telegram_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_cities_partner_key ON cities (partner_id, key)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_whitelist_partner_telegram ON whitelist_entries (partner_id, telegram_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_access_partner_telegram ON admin_access (partner_id, telegram_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_oneshot_partner_event ON oneshot_events (partner_id, network, telegram_chat_id, message_id)",
+        ):
+            await conn.execute(text(stmt))
+
+        # These dictionaries use a composite key so each clone can manage its own values.
+        for table, columns in (("app_settings", "partner_id, key"), ("tariff_categories", "partner_id, code")):
+            await conn.execute(text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_pkey"))
+            await conn.execute(text(f"ALTER TABLE {table} ADD CONSTRAINT {table}_pkey PRIMARY KEY ({columns})"))
 
 
 # Версия справочника тарифов. Поднимать, когда названия или порядок категорий

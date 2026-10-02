@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
+from app.bot.filters import IsPlatformBot
 from app.core.texts import WHITELABEL_BTN, WHITELABEL_TEXT
 from app.db.session import SessionLocal
 from app.keyboards.helpers import MENU_BACK_TEXTS
@@ -16,6 +17,8 @@ from app.services.welcome import send_menu_text
 from app.states.flows import WhitelabelApplyFlow
 
 whitelabel_apply_router = Router()
+whitelabel_apply_router.message.filter(IsPlatformBot())
+whitelabel_apply_router.callback_query.filter(IsPlatformBot())
 
 _STATUS_LABELS = {
     WhitelabelApplicationStatus.pending: "⏳ на рассмотрении",
@@ -151,10 +154,7 @@ async def wl_apply_finish(message: Message, state: FSMContext) -> None:
         f"<b>✅ Заявка #{app_id} отправлена</b>\n"
         "╭──────────────────────╮\n"
         f"Бренд: <b>{brand}</b>{bot_line}\n\n"
-        "Администратор получил уведомление.\n"
-        "Обычно отвечаем в течение 1–2 рабочих дней.",
+        "Мы свяжемся с вами после рассмотрения заявки.\n"
+        "Для подключения бота используйте раздел «Франшиза».",
         reply_markup=inline_main_menu(),
     )
-    from app.services.notifications import notify_admins_wl_application
-
-    await notify_admins_wl_application(app_id)

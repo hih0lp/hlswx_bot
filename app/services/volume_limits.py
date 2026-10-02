@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,8 +29,10 @@ def daily_limit_for_volume(volume: str) -> int | None:
     return 3
 
 
+MSK = timezone(timedelta(hours=3)) # Фикс проблемы 8. UTC -> MSK
+
 def _day_start() -> datetime:
-    now = datetime.now(UTC)
+    now = datetime.now(MSK)
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 

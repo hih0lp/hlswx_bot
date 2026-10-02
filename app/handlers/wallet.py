@@ -5,6 +5,8 @@ import logging
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, PreCheckoutQuery
+from decimal import Decimal
+
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -31,6 +33,7 @@ from app.services.stars import rub_to_stars, send_stars_topup_invoice
 from app.services.users import get_or_create_user
 from app.services.wallet import InsufficientBalanceError, format_rub, parse_amount_text
 from app.states.flows import TopUpFlow
+from app.services.tenant import current_partner_id
 
 logger = logging.getLogger("wallet")
 wallet_router = Router()
@@ -62,23 +65,24 @@ async def topup_amount(message: Message, state: FSMContext) -> None:
 
     settings = get_settings()
     amount = parse_amount_text(message.text)
-    if amount is None or amount < settings.min_topup_amount:
+    if amount is None or amount < Decimal(settings.min_topup_amount):
         await banners.show_new_screen(
             message,
             banners.ATTENTION,
-            f"Введите сумму от <b>{settings.min_topup_amount} ₽</b> целым числом.",
+            f"Введите сумму от <b>{settings.min_topup_amount} ₽</b>. Копейки можно указать через запятую, например 100,50.",
             inline_back_home(),
         )
         return
 
-    stars = rub_to_stars(amount)
+    is_whole_rubles = amount == amount.to_integral_value()
+    stars = rub_to_stars(int(amount)) if is_whole_rubles else None
     await state.update_data(topup_amount=amount)
     await state.set_state(TopUpFlow.waiting_method)
     await banners.show_new_screen(
         message,
         banners.TOPUP,
         TOPUP_METHOD.format(amount=format_rub(amount)),
-        topup_method_keyboard(amount, stars),
+        topup_method_keyboard(amount, stars, allow_stars=current_partner_id() == 0 and stars is not None),
     )
 
 
@@ -86,7 +90,7 @@ async def topup_amount(message: Message, state: FSMContext) -> None:
 async def topup_card(callback: CallbackQuery, state: FSMContext) -> None:
     from app.services import banners
 
-    amount = int(callback.data.rsplit(":", 1)[-1])
+    amount = Decimal(callback.data.rsplit(":", 1)[-1])
     await callback.answer()
     try:
         async with SessionLocal() as session:
@@ -120,7 +124,14 @@ async def topup_card(callback: CallbackQuery, state: FSMContext) -> None:
 async def topup_stars(callback: CallbackQuery, state: FSMContext) -> None:
     from app.services import banners
 
-    amount = int(callback.data.rsplit(":", 1)[-1])
+    amount_value = Decimal(callback.data.rsplit(":", 1)[-1])
+    if amount_value != amount_value.to_integral_value():
+        await callback.answer("Telegram Stars доступны для целой суммы в рублях", show_alert=True)
+        return
+    amount = int(amount_value)
+    if current_partner_id():
+        await callback.answer("В боте партнёра пополнение доступно банковской картой", show_alert=True)
+        return
     await callback.answer()
     try:
         from app.bot.runtime import get_bot
@@ -162,7 +173,7 @@ async def topup_stars(callback: CallbackQuery, state: FSMContext) -> None:
 
 @wallet_router.pre_checkout_query(F.invoice_payload.startswith("topup_stars:"))
 async def stars_pre_checkout(query: PreCheckoutQuery) -> None:
-    await query.answer(ok=True)
+    await query.answer(ok=current_partner_id() == 0, error_message="В этом боте оплата доступна банковской картой.")
 
 
 @wallet_router.message(F.successful_payment)
@@ -179,6 +190,11 @@ async def stars_successful_payment(message: Message) -> None:
     except ValueError:
         return
 
+    if current_partner_id():
+        logger.error("Unexpected Telegram Stars payment in partner tenant; payload=%s", sp.invoice_payload)
+        await message.answer("Оплата Stars в этом боте не поддерживается. Обратитесь к владельцу бота.")
+        return
+
     async with SessionLocal() as session:
         payment = await session.scalar(select(Payment).where(Payment.id == payment_id))
         if not payment or payment.status == PaymentStatus.succeeded:
@@ -193,7 +209,7 @@ async def stars_successful_payment(message: Message) -> None:
 
     await notify_payment_success(user_id, result, user_id, amount=amount)
     await message.answer(
-        f"✅ <b>Баланс пополнен</b> на <b>{format_rub(int(amount))} ₽</b>\n"
+        f"✅ <b>Баланс пополнен</b> на <b>{format_rub(amount)} ₽</b>\n"
         f"Оплачено: <b>{sp.total_amount} ⭐</b>",
     )
 

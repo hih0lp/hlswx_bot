@@ -22,7 +22,7 @@ from aiogram.types import (
 )
 from sqlalchemy import func, select
 
-from app.bot.filters import IsAdmin
+from app.bot.filters import IsStaff
 from app.core import admin_texts as T
 from app.db.session import SessionLocal
 from app.keyboards.style import STYLE_MAIN, STYLE_PLAIN
@@ -35,8 +35,8 @@ from app.states.admin import AdminFlow
 logger = logging.getLogger("admin")
 
 router = Router()
-router.callback_query.filter(IsAdmin())
-router.message.filter(IsAdmin())
+router.callback_query.filter(IsStaff())
+router.message.filter(IsStaff())
 
 MESSAGES_CB = "adm:msg"
 ONE_CB = "adm:msg:one"

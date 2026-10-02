@@ -25,13 +25,14 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.session import SessionLocal
 from app.models.entities import AdminAccess, AdminRole
+from app.services.tenant import current_partner_id, current_partner_owner_id
 
 logger = logging.getLogger("access")
 
 # Роль, выданная в обход бота (правкой в БД), доедет не позже чем за минуту.
 CACHE_TTL_SEC = 60
 
-_cache: dict[int, AdminRole] = {}
+_cache: dict[tuple[int, int], AdminRole] = {}
 _loaded_at: float = 0.0
 
 
@@ -43,8 +44,10 @@ async def refresh() -> None:
     """Перечитать таблицу доступов в память."""
     global _cache, _loaded_at
     async with SessionLocal() as session:
-        rows = (await session.scalars(select(AdminAccess))).all()
-    _cache = {row.telegram_id: row.role for row in rows}
+        rows = (await session.scalars(
+            select(AdminAccess).execution_options(skip_partner_scope=True),
+        )).all()
+    _cache = {(row.partner_id, row.telegram_id): row.role for row in rows}
     _loaded_at = time.monotonic()
 
 
@@ -65,9 +68,12 @@ def role_of(telegram_id: int | None) -> AdminRole | None:
     """
     if not telegram_id:
         return None
-    if telegram_id in _owner_ids():
+    partner_id = current_partner_id()
+    if partner_id == 0 and telegram_id in _owner_ids():
         return AdminRole.admin
-    return _cache.get(telegram_id)
+    if partner_id and telegram_id == current_partner_owner_id():
+        return AdminRole.admin
+    return _cache.get((partner_id, telegram_id))
 
 
 def is_staff(telegram_id: int | None) -> bool:
@@ -130,7 +136,13 @@ async def list_access() -> list[AdminAccess]:
 async def staff_ids() -> set[int]:
     """Все, кому уходят служебные уведомления: владельцы плюс выданные роли."""
     await ensure_loaded()
-    return _owner_ids() | set(_cache)
+    partner_id = current_partner_id()
+    ids = {telegram_id for (scope, telegram_id) in _cache if scope == partner_id}
+    if partner_id == 0:
+        ids |= _owner_ids()
+    elif current_partner_owner_id():
+        ids.add(current_partner_owner_id())
+    return ids
 
 
 async def admin_ids() -> set[int]:
@@ -140,6 +152,13 @@ async def admin_ids() -> set[int]:
     `IsAdmin`, и нажатие кнопки у него просто ничего не сделает (ТЗ 6.11, 7).
     """
     await ensure_loaded()
-    return _owner_ids() | {
-        telegram_id for telegram_id, role in _cache.items() if role is AdminRole.admin
+    partner_id = current_partner_id()
+    ids = {
+        telegram_id for (scope, telegram_id), role in _cache.items()
+        if scope == partner_id and role is AdminRole.admin
     }
+    if partner_id == 0:
+        ids |= _owner_ids()
+    elif current_partner_owner_id():
+        ids.add(current_partner_owner_id())
+    return ids

@@ -43,6 +43,7 @@ from app.services import access
 from app.services.chat_network import chat_display_title
 from app.services.pricing import posts_volume_button_label
 from app.services.textfmt import chats_label
+from app.services.tenant import current_partner_id
 
 HOME_CB = "menu:home"
 
@@ -68,8 +69,9 @@ def reply_main_keyboard(*, is_admin: bool = False, has_subscription: bool = Fals
             KeyboardButton(text=BTN_PROFILE, style=STYLE_PLAIN),
             KeyboardButton(text=BTN_SUBSCRIPTION, style=STYLE_PLAIN),
         ],
-        [KeyboardButton(text=BTN_FRANCHISE, style=STYLE_PLAIN)],
     ]
+    if current_partner_id() == 0:
+        rows.append([KeyboardButton(text=BTN_FRANCHISE, style=STYLE_PLAIN)])
     if is_admin:
         rows.append([KeyboardButton(text=ADMIN_BTN, style=STYLE_DANGER)])
     return ReplyKeyboardMarkup(
@@ -101,6 +103,14 @@ def _home_button() -> InlineKeyboardButton:
 
 def inline_home_row() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_home_button()]])
+
+
+def _back_home_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=BTN_BACK, callback_data=HOME_CB, style=STYLE_PLAIN)
+
+
+def inline_back_home_row() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_back_home_button()]])
 
 
 def inline_nav(back_cb: str | None = None) -> InlineKeyboardMarkup:
@@ -157,18 +167,17 @@ def inline_publish_paywall() -> InlineKeyboardMarkup:
 
 
 def profile_keyboard() -> InlineKeyboardMarkup:
-    """Фрейм «Профиль»."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=BTN_TOPUP, callback_data="profile:topup", style=STYLE_MAIN),
-                InlineKeyboardButton(text=BTN_MYSUBS, callback_data="profile:mysubs", style=STYLE_PLAIN),
-            ],
-            [InlineKeyboardButton(text=BTN_INTEGRATION, callback_data="menu:connect", style=STYLE_PLAIN)],
-            [InlineKeyboardButton(text=BTN_RULES, callback_data="menu:rules", style=STYLE_PLAIN)],
-            [_home_button()],
+    """Фрейм «Профиль»; клон показывает владельцу вход в управление франшизой."""
+    rows = [
+        [
+            InlineKeyboardButton(text=BTN_TOPUP, callback_data="profile:topup", style=STYLE_MAIN),
+            InlineKeyboardButton(text=BTN_MYSUBS, callback_data="profile:mysubs", style=STYLE_ACTIVE),
         ],
-    )
+        [InlineKeyboardButton(text=BTN_INTEGRATION, callback_data="menu:connect", style=STYLE_PLAIN)],
+        [InlineKeyboardButton(text=BTN_RULES, callback_data="menu:rules", style=STYLE_PLAIN)],
+    ]
+    rows.append([_back_home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cities_keyboard(
@@ -332,27 +341,25 @@ def publication_keyboard(publication_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def topup_method_keyboard(amount: int, stars: int) -> InlineKeyboardMarkup:
+def topup_method_keyboard(amount, stars: int | None, *, allow_stars: bool = True) -> InlineKeyboardMarkup:
     """Фрейм «Способ пополнения» — порядок кнопок как в макете."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"💳 Банковская карта ({amount:,} ₽)".replace(",", " "),
-                    callback_data=f"topup:card:{amount}",
-                    style=STYLE_MAIN,
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"⭐ Telegram Stars ({stars} ⭐)",
-                    callback_data=f"topup:stars:{amount}",
-                    style=STYLE_PLAIN,
-                ),
-            ],
-            [_home_button()],
-        ],
-    )
+    from app.services.wallet import format_rub
+
+    amount_text = format_rub(amount)
+    amount_callback = f"{amount:.2f}"
+    rows = [[InlineKeyboardButton(
+        text=f"💳 Банковская карта ({amount_text} ₽)",
+        callback_data=f"topup:card:{amount_callback}",
+        style=STYLE_MAIN,
+    )]]
+    if allow_stars and stars is not None:
+        rows.append([InlineKeyboardButton(
+            text=f"⭐ Telegram Stars ({stars} ⭐)",
+            callback_data=f"topup:stars:{int(amount)}",
+            style=STYLE_PLAIN,
+        )])
+    rows.append([_home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_choice_keyboard(kind: str, item_id: int, total: int, balance) -> InlineKeyboardMarkup:

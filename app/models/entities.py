@@ -20,6 +20,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 
+class TenantScoped:
+    partner_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0", index=True
+    )
+
+
 class PaymentStatus(str, enum.Enum):
     pending = "pending"
     succeeded = "succeeded"
@@ -34,10 +40,11 @@ class SubscriptionStatus(str, enum.Enum):
     blocked = "blocked"
 
 
-class User(Base):
+class User(TenantScoped, Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("partner_id", "telegram_id", name="uq_users_partner_telegram"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str | None] = mapped_column(String(64))
     full_name: Mapped[str] = mapped_column(String(255), default="")
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
@@ -50,7 +57,7 @@ class User(Base):
     saved_contacts: Mapped[list["SavedContact"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
-class SavedContact(Base):
+class SavedContact(TenantScoped, Base):
     __tablename__ = "saved_contacts"
     __table_args__ = (UniqueConstraint("user_id", "contact", name="uq_user_contact"),)
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -61,15 +68,16 @@ class SavedContact(Base):
     user: Mapped["User"] = relationship(back_populates="saved_contacts")
 
 
-class City(Base):
+class City(TenantScoped, Base):
     __tablename__ = "cities"
+    __table_args__ = (UniqueConstraint("partner_id", "key", name="uq_cities_partner_key"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    key: Mapped[str] = mapped_column(String(32), index=True)
     label: Mapped[str] = mapped_column(String(100))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
-class Chat(Base):
+class Chat(TenantScoped, Base):
     __tablename__ = "chats"
     id: Mapped[int] = mapped_column(primary_key=True)
     city_id: Mapped[int] = mapped_column(ForeignKey("cities.id"), index=True)
@@ -93,7 +101,7 @@ class TrainingSample(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ClassificationLog(Base):
+class ClassificationLog(TenantScoped, Base):
     __tablename__ = "classification_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -105,7 +113,7 @@ class ClassificationLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class Subscription(Base):
+class Subscription(TenantScoped, Base):
     __tablename__ = "subscriptions"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -130,7 +138,7 @@ class Subscription(Base):
     chats: Mapped[list["SubscriptionChat"]] = relationship(back_populates="subscription", cascade="all, delete-orphan")
 
 
-class SubscriptionChat(Base):
+class SubscriptionChat(TenantScoped, Base):
     __tablename__ = "subscription_chats"
     __table_args__ = (UniqueConstraint("subscription_id", "chat_id", name="uq_sub_chat"),)
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -141,7 +149,7 @@ class SubscriptionChat(Base):
     chat: Mapped["Chat"] = relationship()
 
 
-class PackageOrder(Base):
+class PackageOrder(TenantScoped, Base):
     __tablename__ = "package_orders"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -155,7 +163,7 @@ class PackageOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class Payment(Base):
+class Payment(TenantScoped, Base):
     __tablename__ = "payments"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -174,7 +182,7 @@ class Payment(Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class Publication(Base):
+class Publication(TenantScoped, Base):
     """Пост пользователя целиком: одна публикация → несколько задач по группам."""
 
     __tablename__ = "publications"
@@ -195,7 +203,7 @@ class Publication(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class PublishJob(Base):
+class PublishJob(TenantScoped, Base):
     __tablename__ = "publish_jobs"
     id: Mapped[int] = mapped_column(primary_key=True)
     publication_id: Mapped[int | None] = mapped_column(
@@ -222,7 +230,7 @@ class PublishJob(Base):
     photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class SubscriptionPublicationLog(Base):
+class SubscriptionPublicationLog(TenantScoped, Base):
     __tablename__ = "subscription_publication_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
     subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id", ondelete="CASCADE"), index=True)
@@ -257,22 +265,40 @@ class WhitelabelApplication(Base):
 class WhitelabelPartner(Base):
     __tablename__ = "whitelabel_partners"
     id: Mapped[int] = mapped_column(primary_key=True)
-    bot_username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # NULL until the owner submits a bot token: payment now happens before the
+    # clone bot exists (ТЗ «Оплата -> Создание бота»), so the row is created
+    # at tariff selection with these still unknown.
+    bot_username: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     owner_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     owner_username: Mapped[str | None] = mapped_column(String(64))
-    api_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    api_key: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     bot_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Deprecated marketplace account field, kept for backward compatibility.
+    yookassa_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Собственные реквизиты партнёра для приёма оплат от клиентов клона (ТЗ
+    # 6.6) — вводятся самим партнёром через бота («Франшиза → Платёжные
+    # реквизиты»), а не прописываются разработчиком вручную в переменных
+    # окружения (старый способ остаётся запасным в payment_provider_for_partner).
+    yookassa_shop_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    yookassa_secret_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     brand_title: Mapped[str | None] = mapped_column(String(128))
     linked_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[str | None] = mapped_column(String(255))
+    franchise_tier: Mapped[str] = mapped_column(String(16), default="basic", server_default="basic")
+    franchise_billing_status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    franchise_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    franchise_next_charge_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    franchise_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    franchise_last_notice_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class WhitelistEntry(Base):
+class WhitelistEntry(TenantScoped, Base):
     __tablename__ = "whitelist_entries"
+    __table_args__ = (UniqueConstraint("partner_id", "telegram_id", name="uq_whitelist_partner_telegram"),)
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True, index=True)
+    telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     username: Mapped[str | None] = mapped_column(String(64))
     city_keys: Mapped[str] = mapped_column(Text, default="[]")
     chat_ids: Mapped[str] = mapped_column(Text, default="[]")
@@ -282,7 +308,7 @@ class WhitelistEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class B2bIntegration(Base):
+class B2bIntegration(TenantScoped, Base):
     __tablename__ = "b2b_integrations"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -292,7 +318,7 @@ class B2bIntegration(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class ChatSlotState(Base):
+class ChatSlotState(TenantScoped, Base):
     """Состояние слота группы: тишина после разового поста + последняя публикация."""
 
     __tablename__ = "chat_publish_locks"
@@ -308,12 +334,12 @@ class ChatSlotState(Base):
 ChatPublishLock = ChatSlotState
 
 
-class OneshotEvent(Base):
+class OneshotEvent(TenantScoped, Base):
     """Факт выхода разового поста в группе — приходит от Hammer/W, нужен для идемпотентности."""
 
     __tablename__ = "oneshot_events"
     __table_args__ = (
-        UniqueConstraint("network", "telegram_chat_id", "message_id", name="uq_oneshot_event"),
+        UniqueConstraint("partner_id", "network", "telegram_chat_id", "message_id", name="uq_oneshot_partner_event"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     network: Mapped[str] = mapped_column(String(20), default="hammer")
@@ -325,7 +351,7 @@ class OneshotEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class PublishEvent(Base):
+class PublishEvent(TenantScoped, Base):
     """Журнал очереди: публикации, ошибки, срабатывания приоритетов (ТЗ 6.1)."""
 
     __tablename__ = "publish_events"
@@ -353,7 +379,9 @@ class AdminRole(str, enum.Enum):
     manager = "manager"
 
 
-class AdminAccess(Base):
+class AdminAccess(TenantScoped, Base):
+    __table_args__ = (UniqueConstraint("partner_id", "telegram_id", name="uq_admin_access_partner_telegram"),)
+
     """Выданный доступ к админ-панели.
 
     Владельцы из ADMIN_IDS / OWNER_IDS в таблицу не попадают и остаются
@@ -363,14 +391,14 @@ class AdminAccess(Base):
 
     __tablename__ = "admin_access"
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str | None] = mapped_column(String(64))
     role: Mapped[AdminRole] = mapped_column(Enum(AdminRole), default=AdminRole.manager)
     granted_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class AppSetting(Base):
+class AppSetting(TenantScoped, Base):
     """Настройки, которые администратор меняет из панели (ТЗ 6.10, 7).
 
     Значения из .env остаются дефолтами: строка появляется здесь только
@@ -378,13 +406,14 @@ class AppSetting(Base):
     """
 
     __tablename__ = "app_settings"
+    partner_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, server_default="0")
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
-class TariffCategory(Base):
+class TariffCategory(TenantScoped, Base):
     """Справочник тарифов публикации по категориям объявлений (ТЗ 6.6).
 
     `code` — то же, чем размечена обучающая выборка и на что ссылаются уже
@@ -393,6 +422,7 @@ class TariffCategory(Base):
     """
 
     __tablename__ = "tariff_categories"
+    partner_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, server_default="0")
     code: Mapped[str] = mapped_column(String(32), primary_key=True)
     label: Mapped[str] = mapped_column(String(100))
     price_per_chat: Mapped[int] = mapped_column(Integer, default=0)
@@ -404,7 +434,7 @@ class TariffCategory(Base):
     updated_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
-class AdminAuditLog(Base):
+class AdminAuditLog(TenantScoped, Base):
     """Действия администратора и менеджера — для последующей диагностики (ТЗ 7).
 
     Существующий PublishEvent для этого не годится: у него нет автора.

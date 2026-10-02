@@ -28,7 +28,7 @@ from aiogram.types import (
 )
 from sqlalchemy import desc, func, select
 
-from app.bot.filters import IsAdmin
+from app.bot.filters import IsAdmin, IsPlatformBot
 from app.config import get_settings
 from app.core import admin_texts as T
 from app.db.session import SessionLocal
@@ -49,8 +49,8 @@ from app.states.admin import AdminFlow
 logger = logging.getLogger("admin")
 router = Router()
 # Раздел «Управление» целиком доступен только администратору (ТЗ 6.11, 7).
-router.callback_query.filter(IsAdmin())
-router.message.filter(IsAdmin())
+router.callback_query.filter(IsPlatformBot(), IsAdmin())
+router.message.filter(IsPlatformBot(), IsAdmin())
 
 MANAGE_CB = "adm:manage"
 REVIEW_CB = "adm:ml"                 # префикс сохранён: старые кнопки в истории чатов

@@ -89,6 +89,25 @@ def banner_path(key: str | None) -> Path | None:
     return path if path.exists() else None
 
 
+async def _custom_banner_file_id(key: str | None) -> str | None:
+    """Return this premium tenant's Telegram file_id, if one was uploaded."""
+    if not key:
+        return None
+    from app.services.tenant import current_partner_id, current_partner_tier
+    partner_id = current_partner_id()
+    if not partner_id or current_partner_tier() != "premium":
+        return None
+    from sqlalchemy import select
+    from app.db.session import SessionLocal
+    from app.models.entities import AppSetting
+    async with SessionLocal() as session:
+        setting = await session.scalar(select(AppSetting).where(
+            AppSetting.partner_id == partner_id,
+            AppSetting.key == f"premium_banner:{key}",
+        ))
+        return setting.value if setting and setting.value else None
+
+
 # Последний показанный экран в каждом чате. Нужен, потому что главное меню —
 # reply-клавиатура: её нажатие приходит обычным сообщением пользователя, и
 # сообщения с экраном, который надо обновить, в обработчике нет. Держим в
@@ -134,16 +153,10 @@ async def send_banner_to(
     text: str,
     reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
 ) -> None:
-    """То же, но по chat_id — для сообщений, которые бот шлёт сам.
-
-    Так уходят фоновые уведомления (окончание подписки), у которых нет
-    исходного сообщения пользователя.
-
-    Если баннера нет или Telegram его не принял, экран уходит обычным
-    сообщением — раздел остаётся рабочим.
-    """
+    """Send the tenant's premium banner, falling back to the platform asset."""
     path = banner_path(key)
-    if path is None:
+    custom_file_id = await _custom_banner_file_id(key)
+    if path is None and not custom_file_id:
         sent = await bot.send_message(
             chat_id, text, reply_markup=reply_markup, link_preview_options=_preview(),
         )
@@ -153,47 +166,49 @@ async def send_banner_to(
     long_text = len(text) > CAPTION_LIMIT
     caption = None if long_text else text
     markup = None if long_text else reply_markup
-
     cache = _load_cache()
-    file_id = cache.get(key)
+    candidates = []
+    if custom_file_id:
+        candidates.append(custom_file_id)
+    if key and cache.get(key) and cache[key] not in candidates:
+        candidates.append(cache[key])
     sent = None
-    if file_id:
+    for file_id in candidates:
         try:
             sent = await bot.send_photo(
                 chat_id, photo=file_id, caption=caption, reply_markup=markup, request_timeout=60,
             )
+            break
         except Exception:
-            logger.warning("Кэшированный file_id баннера %s недействителен", key)
-            sent = None
+            logger.warning("Не удалось отправить file_id баннера %s", key)
 
-    if sent is None:
+    if sent is None and path is not None:
         try:
             sent = await bot.send_photo(
                 chat_id, photo=FSInputFile(path), caption=caption, reply_markup=markup, request_timeout=120,
             )
             photo = getattr(sent, "photo", None)
-            if photo:
+            if photo and key:
                 cache[key] = photo[-1].file_id
                 _save_cache(cache)
         except TelegramForbiddenError:
-            # Пользователь заблокировал бота — это решает вызывающий код.
             raise
         except Exception:
             logger.exception("Не удалось отправить баннер %s", key)
-            fallback = await bot.send_message(
+
+    if sent is None:
+        fallback = await bot.send_message(
             chat_id, text, reply_markup=reply_markup, link_preview_options=_preview(),
         )
-            remember_screen(chat_id, fallback.message_id)
-            return
+        remember_screen(chat_id, fallback.message_id)
+        return
 
     if long_text:
-        # Экран из двух сообщений (баннер + текст) обновить на месте нельзя.
         await bot.send_message(
             chat_id, text, reply_markup=reply_markup, link_preview_options=_preview(),
         )
         forget_screen(chat_id)
         return
-
     remember_screen(chat_id, sent.message_id)
 
 
@@ -244,6 +259,28 @@ async def drop_screen_markup(bot, chat_id: int) -> None:
         logger.debug("Кнопки с прошлого экрана не сняты", exc_info=True)
 
 
+async def delete_last_screen(bot, chat_id: int) -> None:
+    """Удалить последний показанный экран в чате — для случаев, когда он не
+    просто покинут, а потерял смысл (например, экран оплаты после того, как
+    оплата прошла: кнопка «Оплатить» вела бы на уже закрытый счёт).
+
+    Если удалить нельзя (сообщение старше 48 часов, нет прав), как и в
+    `_delete_screen`, хотя бы снимаем кнопки.
+    """
+    message_id = _LAST_SCREEN.get(chat_id)
+    if message_id is None:
+        return
+    forget_screen(chat_id)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        logger.debug("Оплаченный экран не удалился, снимаю кнопки", exc_info=True)
+        try:
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except Exception:
+            logger.debug("Не удалось снять кнопки с оплаченного экрана", exc_info=True)
+
+
 async def _edit_screen(
     bot,
     chat_id: int,
@@ -265,7 +302,8 @@ async def _edit_screen(
         return False
 
     path = banner_path(key)
-    if path is None:
+    custom_file_id = await _custom_banner_file_id(key)
+    if path is None and not custom_file_id:
         try:
             await bot.edit_message_text(
                 text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup,
@@ -283,9 +321,15 @@ async def _edit_screen(
             return False
 
     cache = _load_cache()
-    for media in (cache.get(key), FSInputFile(path)):
-        if media is None:
+    media_sources = [custom_file_id, cache.get(key)]
+    if path is not None:
+        media_sources.append(FSInputFile(path))
+    seen = set()
+    for media in media_sources:
+        if media is None or (isinstance(media, str) and media in seen):
             continue
+        if isinstance(media, str):
+            seen.add(media)
         try:
             sent = await bot.edit_message_media(
                 media=InputMediaPhoto(media=media, caption=text, parse_mode="HTML"),
@@ -304,7 +348,7 @@ async def _edit_screen(
             logger.exception("Не удалось обновить баннер %s", key)
             return False
 
-        if isinstance(sent, Message) and sent.photo:
+        if isinstance(sent, Message) and sent.photo and media != custom_file_id and key:
             cache[key] = sent.photo[-1].file_id
             _save_cache(cache)
         return True

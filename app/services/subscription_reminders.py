@@ -90,46 +90,42 @@ async def _send(telegram_id: int, text: str, subscription_id: int) -> bool:
     return True
 
 
-async def process_subscription_reminders(now: datetime | None = None) -> dict[str, int]:
-    """Один проход: напоминания за сутки и уведомления об окончании.
-
-    Возвращает счётчики — их удобно проверять в тестах и логах.
-    """
+async def process_subscription_reminders(
+    now: datetime | None = None,
+    *,
+    subscription_id: int | None = None,
+) -> dict[str, int]:
+    """Run reminders; optionally limit a test pass to one subscription."""
     now = now or datetime.now(UTC)
     sent = {"reminded": 0, "expired": 0}
 
     async with SessionLocal() as session:
-        # 1. Заканчивается в ближайшие сутки — напоминаем один раз.
-        soon = (
-            await session.scalars(
-                select(Subscription).where(
-                    Subscription.status == SubscriptionStatus.active,
-                    Subscription.reminded_at.is_(None),
-                    Subscription.expires_at.is_not(None),
-                    Subscription.expires_at > now,
-                    Subscription.expires_at <= now + REMIND_BEFORE,
-                ),
-            )
-        ).all()
+        soon_query = select(Subscription).where(
+            Subscription.status == SubscriptionStatus.active,
+            Subscription.reminded_at.is_(None),
+            Subscription.expires_at.is_not(None),
+            Subscription.expires_at > now,
+            Subscription.expires_at <= now + REMIND_BEFORE,
+        )
+        if subscription_id is not None:
+            soon_query = soon_query.where(Subscription.id == subscription_id)
+        soon = (await session.scalars(soon_query)).all()
         for sub in soon:
             text = await _format(session, sub, SUB_EXPIRING_SOON)
             telegram_id = await _telegram_id(session, sub.user_id)
-            if telegram_id:
-                if await _send(telegram_id, text, sub.id):
-                    sent["reminded"] += 1
+            if telegram_id and await _send(telegram_id, text, sub.id):
+                sent["reminded"] += 1
             sub.reminded_at = now
         await session.commit()
 
-        # 2. Срок вышел — переводим в expired и показываем экран из макета.
-        over = (
-            await session.scalars(
-                select(Subscription).where(
-                    Subscription.status == SubscriptionStatus.active,
-                    Subscription.expires_at.is_not(None),
-                    Subscription.expires_at <= now,
-                ),
-            )
-        ).all()
+        over_query = select(Subscription).where(
+            Subscription.status == SubscriptionStatus.active,
+            Subscription.expires_at.is_not(None),
+            Subscription.expires_at <= now,
+        )
+        if subscription_id is not None:
+            over_query = over_query.where(Subscription.id == subscription_id)
+        over = (await session.scalars(over_query)).all()
         for sub in over:
             text = await _format(session, sub, SUB_EXPIRED)
             telegram_id = await _telegram_id(session, sub.user_id)

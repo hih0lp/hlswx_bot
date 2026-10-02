@@ -30,6 +30,7 @@ from app.handlers.admin import (
     tariffs,
     users,
     whitelist,
+    premium_banners,
 )
 from app.handlers.admin.home import _show_panel  # noqa: F401 — импортируют извне
 
@@ -59,7 +60,7 @@ async def log_callback_errors(
 
 for _section in (
     home, stats, users, payments, publications, queue, places, tariffs,
-    manage, access_grant, messages, whitelist, partners, legacy,
+    manage, access_grant, messages, whitelist, partners, legacy, premium_banners,
 ):
     admin_router.include_router(_section.router)
 

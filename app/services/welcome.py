@@ -94,8 +94,13 @@ def subscriptions_status_text(active: int, finished: int) -> str:
 def home_screen_text(active: int, finished: int) -> str:
     """Текст главного меню — фреймы «Home» в трёх состояниях."""
     if not active and not finished:
-        return HOME_NEW
-    return HOME_ACTIVE.format(status=subscriptions_status_text(active, finished))
+        text = HOME_NEW
+    else:
+        text = HOME_ACTIVE.format(status=subscriptions_status_text(active, finished))
+    from app.services.tenant import current_partner_id, current_partner_tier
+    if current_partner_id() and current_partner_tier() == "basic":
+        text += "\n\nБот создан на платформе @HLSWX"
+    return text
 
 
 def menu_reply_keyboard(user_id: int | None = None, *, has_subscription: bool = False) -> ReplyKeyboardMarkup:

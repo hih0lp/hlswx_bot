@@ -21,6 +21,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.session import SessionLocal
 from app.models.entities import AppSetting
+from app.services.tenant import current_partner_id
 
 logger = logging.getLogger("settings_store")
 
@@ -47,7 +48,7 @@ _DEFAULTS = {
     CHAT_CATALOG_VERSION: lambda: 0,
 }
 
-_cache: dict[str, str] = {}
+_cache: dict[tuple[int, str], str] = {}
 _loaded_at: float = 0.0
 
 
@@ -62,8 +63,10 @@ def default_of(key: str) -> int:
 async def refresh() -> None:
     global _cache, _loaded_at
     async with SessionLocal() as session:
-        rows = (await session.scalars(select(AppSetting))).all()
-    _cache = {row.key: row.value for row in rows}
+        rows = (await session.scalars(
+            select(AppSetting).execution_options(skip_partner_scope=True),
+        )).all()
+    _cache = {(row.partner_id, row.key): row.value for row in rows}
     _loaded_at = time.monotonic()
 
 
@@ -78,7 +81,7 @@ async def _ensure_loaded() -> None:
 async def get_int(key: str) -> int:
     """Текущее значение настройки: из БД, иначе из `.env`."""
     await _ensure_loaded()
-    raw = _cache.get(key)
+    raw = _cache.get((current_partner_id(), key))
     if raw is None:
         return default_of(key)
     try:

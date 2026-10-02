@@ -372,7 +372,7 @@ async def admin_city_delete(callback: CallbackQuery) -> None:
 # Кнопки старых сообщений («Отключить город», «💬 чат»): включать и отключать
 # больше нельзя — просто открываем карточку города.
 @router.callback_query(F.data.startswith(CITY_TOGGLE_CB))
-async def admin_city_toggle_legacy(callback: CallbackQuery) -> None:
+async def admin_city_toggle(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     rendered = await _city_screen(int(callback.data.rsplit(":", 1)[-1]))
@@ -382,7 +382,7 @@ async def admin_city_toggle_legacy(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith(CHAT_TOGGLE_CB))
-async def admin_chat_toggle_legacy(callback: CallbackQuery) -> None:
+async def admin_chat_toggle(callback: CallbackQuery) -> None:
     if not _is_admin(callback.from_user.id):
         return
     chat_id = int(callback.data.rsplit(":", 1)[-1])
@@ -544,26 +544,29 @@ async def admin_chat_add_title(message: Message, state: FSMContext) -> None:
 
 
 async def _resolve_target(raw: str) -> tuple[str | None, int | None, str]:
-    """Разбирает «@username» или «-100…» в пару (username, chat_id, ошибка).
-
-    До этой правки чат заводился только по username, а `telegram_chat_id`
-    оставался пустым — публикация в такой чат падала с `chat_not_configured`
-    (см. `app/services/publish.py`). Теперь числовой ID кладём как есть, а по
-    username спрашиваем его у Telegram сразу.
-    """
+    """Resolve a chat and require the active bot to be an administrator there."""
     raw = raw.strip()
     if CHAT_ID_RE.match(raw):
-        return None, int(raw), ""
-    if not USERNAME_RE.match(raw):
+        username, target = None, int(raw)
+    elif USERNAME_RE.match(raw):
+        username = raw.lstrip("@")
+        target = f"@{username}"
+    else:
         return None, None, "bad"
 
-    username = raw.lstrip("@")
     from app.bot.runtime import get_bot
 
+    bot = get_bot()
     try:
-        tg = await get_bot().get_chat(f"@{username}")
+        tg = await bot.get_chat(target)
+        me = await bot.get_me()
+        member = await bot.get_chat_member(tg.id, me.id)
     except Exception as exc:
         return username, None, str(exc)[:120]
+    if member.status not in {"administrator", "creator"}:
+        return username, None, "not_admin"
+    if tg.type == "channel" and not getattr(member, "can_post_messages", False):
+        return username, None, "not_admin"
     return username, tg.id, ""
 
 
@@ -582,6 +585,9 @@ async def admin_chat_add(message: Message, state: FSMContext) -> None:
     username, chat_id, error = await _resolve_target(message.text or "")
     if error == "bad":
         await admin_ui.show(message, T.CHAT_ADD_TARGET_BAD, back, edit=False)
+        return
+    if error == "not_admin":
+        await admin_ui.show(message, T.CHAT_ADD_BOT_NOT_ADMIN, back, edit=False)
         return
 
     async with SessionLocal() as session:

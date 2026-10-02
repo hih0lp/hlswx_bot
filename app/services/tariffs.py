@@ -24,6 +24,7 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.ml.categories import CATEGORIES
 from app.models.entities import TariffCategory as TariffRow
+from app.services.tenant import current_partner_id
 
 logger = logging.getLogger("tariffs")
 
@@ -51,7 +52,7 @@ class Tariff:
     sort_order: int = 0
 
 
-_cache: dict[str, Tariff] = {}
+_cache: dict[tuple[int, str], Tariff] = {}
 _loaded_at: float = 0.0
 
 
@@ -83,8 +84,10 @@ def _from_code_defaults(code: str) -> Tariff:
 async def refresh() -> None:
     global _cache, _loaded_at
     async with SessionLocal() as session:
-        rows = (await session.scalars(select(TariffRow))).all()
-    _cache = {row.code: _from_row(row) for row in rows}
+        rows = (await session.scalars(
+            select(TariffRow).execution_options(skip_partner_scope=True),
+        )).all()
+    _cache = {(row.partner_id, row.code): _from_row(row) for row in rows}
     _loaded_at = time.monotonic()
 
 
@@ -104,13 +107,20 @@ def get(code: str) -> Tariff:
     прятать их надо только из списков выбора.
     """
     if _cache:
-        return _cache.get(code) or _cache.get(FALLBACK_CODE) or _from_code_defaults(code)
+        scope = current_partner_id()
+        return _cache.get((scope, code)) or _cache.get((scope, FALLBACK_CODE)) or _from_code_defaults(code)
     return _from_code_defaults(code)
 
 
 def all_tariffs(*, only_active: bool = True) -> list[Tariff]:
     """Тарифы для экранов выбора — без служебных кодов."""
-    source = _cache.values() if _cache else [_from_code_defaults(c) for c in CATEGORIES]
+    scope = current_partner_id()
+    source = (
+        [value for (partner_id, _), value in _cache.items() if partner_id == scope]
+        if _cache else [_from_code_defaults(c) for c in CATEGORIES]
+    )
+    if not source:
+        source = [_from_code_defaults(c) for c in CATEGORIES]
     items = [t for t in source if t.code not in SERVICE_CODES]
     if only_active:
         items = [t for t in items if t.active]

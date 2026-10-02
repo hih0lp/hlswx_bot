@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
+import threading
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +11,7 @@ from yookassa import Configuration, Payment
 from app.config import Settings
 
 logger = logging.getLogger("yookassa")
+_CONFIGURATION_LOCK = threading.RLock()
 
 
 def _payment_to_dict(payment: Any) -> dict[str, Any]:
@@ -29,14 +31,18 @@ def _payment_to_dict(payment: Any) -> dict[str, Any]:
 class YooKassaService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        Configuration.account_id = settings.yookassa_shop_id
-        Configuration.secret_key = settings.yookassa_secret_key
 
     def _create_payment_sync(self, payload: dict[str, Any], idempotence_key: str) -> dict[str, Any]:
-        return _payment_to_dict(Payment.create(payload, idempotence_key))
+        with _CONFIGURATION_LOCK:
+            Configuration.account_id = self.settings.yookassa_shop_id
+            Configuration.secret_key = self.settings.yookassa_secret_key
+            return _payment_to_dict(Payment.create(payload, idempotence_key))
 
     def _get_payment_sync(self, payment_id: str) -> dict[str, Any]:
-        return _payment_to_dict(Payment.find_one(payment_id))
+        with _CONFIGURATION_LOCK:
+            Configuration.account_id = self.settings.yookassa_shop_id
+            Configuration.secret_key = self.settings.yookassa_secret_key
+            return _payment_to_dict(Payment.find_one(payment_id))
 
     async def create_payment(
         self,
@@ -45,17 +51,27 @@ class YooKassaService:
         metadata: dict[str, str],
         idempotence_key: str | None = None,
         return_url: str | None = None,
+        save_payment_method: bool = False,
+        payment_method_id: str | None = None,
+        transfers: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
             "capture": True,
-            "confirmation": {
-                "type": "redirect",
-                "return_url": return_url or self.settings.yookassa_return_url,
-            },
             "description": description,
             "metadata": {k: str(v) for k, v in metadata.items() if v is not None},
         }
+        if transfers:
+            payload["transfers"] = transfers
+        if payment_method_id:
+            payload["payment_method_id"] = payment_method_id
+        else:
+            payload["confirmation"] = {
+                "type": "redirect",
+                "return_url": return_url or self.settings.yookassa_return_url,
+            }
+        if save_payment_method:
+            payload["save_payment_method"] = True
         key = idempotence_key or str(uuid.uuid4())
         return await asyncio.to_thread(self._create_payment_sync, payload, key)
 

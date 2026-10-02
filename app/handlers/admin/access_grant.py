@@ -25,6 +25,7 @@ from app.db.session import SessionLocal
 from app.keyboards.style import STYLE_MAIN, STYLE_PLAIN
 from app.models.entities import AdminRole, User
 from app.services import access, admin_audit, admin_ui
+from app.services.tenant import current_partner_id
 from app.states.admin import AdminFlow
 
 router = Router()
@@ -51,6 +52,22 @@ def _who(username: str | None, telegram_id: int) -> str:
 def _who_plain(username: str | None, telegram_id: int) -> str:
     """Для подписи кнопки: разметка в ней не работает."""
     return f"@{username}" if username else str(telegram_id)
+
+
+@router.callback_query(F.data == MANAGE_CB)
+async def admin_manage_clone(callback: CallbackQuery, state: FSMContext) -> None:
+    """Reduced clone management: available settings without model training."""
+    if not current_partner_id():
+        return  # The platform-only router handles this callback earlier.
+    await state.clear()
+    await callback.answer()
+    rows = [
+        [InlineKeyboardButton(text=T.BTN_MANAGE_WHITELIST, callback_data="adm:manage:wl", style=STYLE_PLAIN)],
+        [InlineKeyboardButton(text=T.BTN_MANAGE_MESSAGES, callback_data="adm:msg", style=STYLE_PLAIN)],
+        [InlineKeyboardButton(text=T.BTN_MANAGE_ACCESS, callback_data=ACCESS_CB, style=STYLE_PLAIN)],
+        [admin_ui.panel_button()],
+    ]
+    await admin_ui.show(callback, "<b>⚙️ Управление</b>", InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data == ACCESS_CB)

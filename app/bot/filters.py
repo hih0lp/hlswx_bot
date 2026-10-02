@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.models.entities import AdminRole
 from app.services import access
+from app.services.tenant import current_partner_id
 
 
 class IsStaff(BaseFilter):
@@ -31,3 +32,10 @@ class IsAdmin(BaseFilter):
     async def __call__(self, event: Message | CallbackQuery) -> bool | dict:
         role = await access.get_role(event.from_user.id if event.from_user else None)
         return {"role": role} if role is AdminRole.admin else False
+
+
+class IsPlatformBot(BaseFilter):
+    """Block platform-only features when an update came from a franchise bot."""
+
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        return current_partner_id() == 0

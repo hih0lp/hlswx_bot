@@ -13,35 +13,6 @@ from app.keyboards.style import STYLE_DANGER, STYLE_MAIN, STYLE_PLAIN
 from app.services import tariffs
 
 
-def admin_wlreq_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⏳ Ожидают", callback_data="adm:wlreq:list:pending", style=STYLE_PLAIN)],
-            [InlineKeyboardButton(text="📋 Все заявки", callback_data="adm:wlreq:list:all", style=STYLE_PLAIN)],
-            [InlineKeyboardButton(text=T.BTN_BACK_TO_PARTNERS, callback_data="adm:wlbl", style=STYLE_PLAIN)],
-        ],
-    )
-
-
-def admin_wlreq_view_keyboard(app_id: int, *, can_partner: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"adm:wlreq:approve:{app_id}", style=STYLE_MAIN),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm:wlreq:reject:{app_id}", style=STYLE_DANGER),
-        ],
-    ]
-    if can_partner:
-        rows.append([
-            InlineKeyboardButton(
-                text="🤖 Создать партнёра",
-                callback_data=f"adm:wlreq:partner:{app_id}",
-                style=STYLE_PLAIN,
-            ),
-        ])
-    rows.append([InlineKeyboardButton(text=T.BTN_BACK_TO_WLREQ, callback_data="adm:wlreq", style=STYLE_PLAIN)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 # Порядок категорий в кнопках выбора — кадр макета 349:381. Он отличается от
 # порядка в «Тарифах» (там «Аренда» идёт раньше «Купли / продажи», а «Другое»
 # последнее), поэтому задан отдельно; неизвестные коды уходят в конец.

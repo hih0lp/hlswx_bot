@@ -1,0 +1,270 @@
+diff -Nur a/app/api/hwls_routes.py b/app/api/hwls_routes.py
+--- a/app/api/hwls_routes.py	2026-09-06 17:26:10.913860663 +0000
++++ b/app/api/hwls_routes.py	2026-09-06 17:26:10.918861125 +0000
+@@ -89,3 +89,139 @@
+             "network": network,
+         },
+     )
++
++
++# ---------------------------------------------------------------------------
++# Правка и закрытие уже опубликованных постов по запросу HLSWX.
++#
++# Пост в группе отправлен ботом Hammer/W, а Telegram разрешает боту править
++# только свои сообщения. Поэтому кнопки «Редактировать» и «Закрыть» в основном
++# боте не могут изменить пост сами — они просят сделать это нас.
++# ---------------------------------------------------------------------------
++
++
++class HwlsEditPayload(BaseModel):
++    telegram_chat_id: int
++    message_id: int
++    text: str
++    contact: str = ""
++    network: str = "hammer"
++
++
++async def _rerender_and_edit(payload: HwlsEditPayload, *, strike: bool) -> tuple[bool, str]:
++    """Перерисовать пост тем же шаблоном и заменить сообщение в группе."""
++    from aiogram.exceptions import TelegramBadRequest
++
++    from app.bot.runtime import get_bot_for_telegram_id
++    from app.services.hwls_relay import bot_telegram_id_for_network, resolve_hammer_chat
++    from app.services.publisher import render_ad_publication
++
++    network = (payload.network or "hammer").lower()
++    try:
++        bot = await get_bot_for_telegram_id(bot_telegram_id_for_network(network))
++    except Exception as exc:
++        return False, f"bot_unavailable: {str(exc)[:120]}"
++
++    async with SessionLocal() as session:
++        chat = await resolve_hammer_chat(
++            session,
++            telegram_chat_id=int(payload.telegram_chat_id),
++            network=network,
++            telegram_username="",
++            city_key="",
++            bot=bot,
++        )
++        if not chat:
++            return False, "chat_not_found"
++
++        me = await bot.get_me()
++        ad_text = payload.text.strip()
++        if strike:
++            # Закрытое объявление остаётся на месте, но зачёркнуто —
++            # так же, как это делает основной бот со своими постами.
++            ad_text = f"<s>{ad_text}</s>"
++        body, markup = await render_ad_publication(
++            session,
++            ad_text,
++            payload.contact.strip(),
++            chat=chat,
++            vip=False,
++            premium=False,
++            bot_username=me.username,
++            ref_payload=None,
++        )
++
++    chat_id = int(payload.telegram_chat_id)
++    message_id = int(payload.message_id)
++    try:
++        await bot.edit_message_text(
++            text=body, chat_id=chat_id, message_id=message_id, reply_markup=markup,
++        )
++    except TelegramBadRequest as exc:
++        err = (exc.message or str(exc)).lower()
++        if "message is not modified" in err:
++            return True, ""
++        # Пост с фотографией — у него не текст, а подпись.
++        if "no text in the message" in err or "message to edit not found" not in err:
++            try:
++                await bot.edit_message_caption(
++                    caption=body, chat_id=chat_id, message_id=message_id, reply_markup=markup,
++                )
++                return True, ""
++            except Exception as exc2:
++                return False, str(exc2)[:200]
++        return False, str(exc)[:200]
++    except Exception as exc:
++        return False, str(exc)[:200]
++    return True, ""
++
++
++async def _handle_edit_request(request: Request, *, strike: bool) -> JSONResponse:
++    client_ip = request.client.host if request.client else "unknown"
++    if not check_rate_limit(f"hwls-edit:{client_ip}", max_calls=120):
++        return JSONResponse({"ok": False, "error": "rate_limit"}, status_code=429)
++
++    if not _authorized(request):
++        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
++
++    try:
++        payload = HwlsEditPayload.model_validate(await request.json())
++    except Exception:
++        return JSONResponse({"ok": False, "error": "invalid_payload"}, status_code=400)
++
++    if not payload.text.strip():
++        return JSONResponse({"ok": False, "error": "text_required"}, status_code=400)
++    if not payload.message_id:
++        return JSONResponse({"ok": False, "error": "message_id_required"}, status_code=400)
++
++    ok, err = await _rerender_and_edit(payload, strike=strike)
++    if not ok:
++        code = 404 if err in ("chat_not_found",) else 502
++        logger.warning(
++            "HWLS %s failed chat=%s msg=%s: %s",
++            "close" if strike else "edit",
++            payload.telegram_chat_id,
++            payload.message_id,
++            err,
++        )
++        return JSONResponse({"ok": False, "error": err}, status_code=code)
++
++    logger.info(
++        "HWLS %s applied chat=%s msg=%s",
++        "close" if strike else "edit",
++        payload.telegram_chat_id,
++        payload.message_id,
++    )
++    return JSONResponse({"ok": True})
++
++
++@router.post("/api/hwls/edit")
++async def hwls_edit(request: Request) -> JSONResponse:
++    """Заменить текст ранее опубликованного объявления."""
++    return await _handle_edit_request(request, strike=False)
++
++
++@router.post("/api/hwls/close")
++async def hwls_close(request: Request) -> JSONResponse:
++    """Пометить объявление закрытым — текст зачёркивается."""
++    return await _handle_edit_request(request, strike=True)
+diff -Nur a/app/config.py b/app/config.py
+--- a/app/config.py	2026-09-06 17:26:10.910860385 +0000
++++ b/app/config.py	2026-09-06 17:26:10.915860848 +0000
+@@ -40,6 +40,9 @@
+     franchise_subscription_price: int = Field(alias="FRANCHISE_SUBSCRIPTION_PRICE", default=1000)
+     webhook_rate_limit_per_min: int = Field(alias="WEBHOOK_RATE_LIMIT_PER_MIN", default=60)
+     hwls_relay_secret: str = Field(alias="HWLS_RELAY_SECRET", default="")
++    # Куда сообщать основному боту о выходе разового поста (ТЗ 6.6).
++    # Пусто — уведомление отключено, поведение как раньше.
++    hwls_oneshot_webhook_url: str = Field(alias="HWLS_ONESHOT_WEBHOOK_URL", default="")
+     hwls_webhook_relay_url: str = Field(
+         alias="HWLS_WEBHOOK_RELAY_URL",
+         default="http://127.0.0.1:8082/payments/yookassa/webhook",
+diff -Nur a/app/services/hwls_notify.py b/app/services/hwls_notify.py
+--- a/app/services/hwls_notify.py	1970-01-01 00:00:00.000000000 +0000
++++ b/app/services/hwls_notify.py	2026-09-06 17:26:10.919861217 +0000
+@@ -0,0 +1,82 @@
++"""Исходящее уведомление основного бота (HLSWX) о выходе разового поста.
++
++Основной бот ведёт очередь публикаций подписчиков и обязан выдерживать
++20-минутную тишину группы после разового поста. Узнать об этом сам он не
++может: Telegram не отдаёт ботам сообщения, отправленные другими ботами.
++Поэтому факт публикации сообщаем ему явно.
++
++Приём на стороне HLSWX: POST /api/hwls/oneshot-published, авторизация тем же
++заголовком X-HWLS-Key, что и входящий /api/hwls/publish. Запрос идемпотентен
++по message_id — повтор окно тишины не сдвигает, ретраить безопасно.
++"""
++
++from __future__ import annotations
++
++import logging
++from datetime import datetime
++
++import httpx
++
++from app.config import get_settings
++
++logger = logging.getLogger("hwls_notify")
++
++
++async def notify_hwls_oneshot_published(
++    *,
++    telegram_chat_id: int | None,
++    telegram_username: str = "",
++    network: str = "hammer",
++    message_id: int | None = None,
++    published_at: datetime | None = None,
++) -> tuple[bool, str]:
++    """Сообщить HLSWX, что в группе вышел разовый пост.
++
++    Возвращает (успех, причина). Ошибка никогда не должна ломать публикацию —
++    вызывающий код обязан её проглотить: пост уже в группе, и откатывать его
++    из-за недоступности соседнего сервиса нельзя.
++    """
++    settings = get_settings()
++    url = (getattr(settings, "hwls_oneshot_webhook_url", "") or "").strip()
++    if not url:
++        return False, "hwls_notify_disabled"
++
++    secret = (settings.hwls_relay_secret or "").strip()
++    if not secret:
++        return False, "hwls_secret_not_configured"
++
++    if not telegram_chat_id and not telegram_username:
++        return False, "chat_unknown"
++
++    payload = {
++        "telegram_chat_id": telegram_chat_id,
++        "telegram_username": (telegram_username or "").lstrip("@"),
++        "network": (network or "hammer").lower(),
++        "message_id": message_id,
++        "published_at": published_at.isoformat() if published_at else None,
++    }
++    headers = {"X-HWLS-Key": secret, "Content-Type": "application/json"}
++
++    try:
++        async with httpx.AsyncClient(timeout=15.0) as client:
++            resp = await client.post(url, json=payload, headers=headers)
++    except httpx.RequestError as exc:
++        logger.warning("HWLS oneshot notify unreachable chat=%s: %s", telegram_chat_id, exc)
++        return False, f"unreachable: {exc}"
++
++    if resp.status_code >= 400:
++        logger.warning(
++            "HWLS oneshot notify rejected chat=%s: %s %s",
++            telegram_chat_id,
++            resp.status_code,
++            resp.text[:200],
++        )
++        return False, f"http_{resp.status_code}"
++
++    logger.info(
++        "HWLS notified about oneshot post chat=%s msg=%s network=%s",
++        telegram_chat_id,
++        message_id,
++        network,
++    )
++    return True, ""
+diff -Nur a/app/services/publisher.py b/app/services/publisher.py
+--- a/app/services/publisher.py	2026-09-06 17:26:10.911860478 +0000
++++ b/app/services/publisher.py	2026-09-06 17:26:10.916860940 +0000
+@@ -335,6 +335,24 @@
+     except Exception:
+         logger.exception("Failed to activate chat lock for ad %s chat %s", ad.id, chat.id)
+ 
++    # Разовый пост закрывает группу на 20 минут и для очереди основного
++    # бота тоже. Сам он об этом не узнает — Telegram не показывает ботам
++    # сообщения других ботов, поэтому сообщаем явно (ТЗ 6.6).
++    if apply_chat_lock:
++        try:
++            from app.services.hwls_notify import notify_hwls_oneshot_published
++
++            await notify_hwls_oneshot_published(
++                telegram_chat_id=chat.telegram_chat_id,
++                telegram_username=chat.telegram_username,
++                network=chat.network,
++                message_id=message_id,
++                published_at=pub.published_at,
++            )
++        except Exception:
++            # Пост уже в группе — сбой уведомления не должен его ломать.
++            logger.exception("Failed to notify HWLS about oneshot ad %s chat %s", ad.id, chat.id)
++
+     return message_id
+ 
+ 

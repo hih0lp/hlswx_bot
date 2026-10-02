@@ -33,3 +33,12 @@ class WhitelabelApplyFlow(StatesGroup):
     brand_title = State()
     bot_username = State()
     comment = State()
+
+
+class FranchiseOnboarding(StatesGroup):
+    waiting_bot_token = State()
+
+
+class FranchisePayout(StatesGroup):
+    waiting_shop_id = State()
+    waiting_secret_key = State()

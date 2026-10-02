@@ -336,6 +336,20 @@ async def _deliver(
     from app.services.hammer_relay import relay_publish
 
     settings = get_settings()
+    from app.services.tenant import current_partner_id
+
+    if current_partner_id():
+        # Franchise groups must receive posts from the franchise bot itself.
+        result = await direct_publish(
+            bot,
+            text=job.text,
+            contact=job.contact,
+            telegram_chat_id=int(chat.telegram_chat_id),
+            photo_url=job.photo_url,
+            pin=pin,
+        )
+        return result, DELIVERY_DIRECT
+
     if _photo_is_ours(job.photo_url):
         direct = await direct_publish(
             bot,

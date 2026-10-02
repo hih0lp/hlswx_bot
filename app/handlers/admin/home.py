@@ -23,11 +23,12 @@ from app.handlers.admin.common import _is_admin
 from app.keyboards.style import STYLE_MAIN, STYLE_PLAIN
 from app.services import access, admin_ui
 from app.services.admin_stats import gather_dashboard_stats
+from app.services.tenant import current_partner_id, current_partner_tier
 
 router = Router()
 
 
-def _menu(*, is_admin: bool) -> InlineKeyboardMarkup:
+def _menu(*, is_admin: bool, partner_tier: str = "") -> InlineKeyboardMarkup:
     """Меню разделов. «Управление» видит только администратор (ТЗ 6.11, 7).
 
     Первые семь пунктов — как на кадре `337:208`; «Города и чаты» и
@@ -57,10 +58,18 @@ def _menu(*, is_admin: bool) -> InlineKeyboardMarkup:
         # разделов ТЗ 6.1. Вход туда теперь там же, где в макете.
         [InlineKeyboardButton(text=T.BTN_PARTNERS, callback_data="adm:wlbl", style=STYLE_PLAIN)],
     ]
-    if is_admin:
-        rows.append(
-            [InlineKeyboardButton(text=T.BTN_MANAGE, callback_data="adm:manage", style=STYLE_PLAIN)],
-        )
+    if current_partner_id() == 0:
+        if is_admin:
+            rows.append(
+                [InlineKeyboardButton(text=T.BTN_MANAGE, callback_data="adm:manage", style=STYLE_PLAIN)],
+            )
+    else:
+        rows = [[button for button in row if button.callback_data != "adm:wlbl"] for row in rows]
+        rows = [row for row in rows if row]
+        if is_admin:
+            rows.append([InlineKeyboardButton(text=T.BTN_MANAGE, callback_data="adm:manage", style=STYLE_PLAIN)])
+        if is_admin and (partner_tier or "").lower() == "premium":
+            rows.append([InlineKeyboardButton(text="🖼 Баннеры", callback_data="adm:banners", style=STYLE_PLAIN)])
     rows.append(
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:home", style=STYLE_MAIN)],
     )
@@ -98,7 +107,10 @@ async def panel_text() -> str:
 async def show_panel(target: Message | CallbackQuery, *, edit: bool | None = None) -> None:
     """Единственный экран панели с баннером — так он нарисован на `337:208`."""
     user = target.from_user
-    markup = _menu(is_admin=access.is_admin(user.id if user else None))
+    markup = _menu(
+        is_admin=access.is_admin(user.id if user else None),
+        partner_tier=current_partner_tier(),
+    )
     await admin_ui.show(target, await panel_text(), markup, edit=edit, banner=True)
 
 

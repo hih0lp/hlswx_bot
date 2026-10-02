@@ -48,7 +48,7 @@ from app.keyboards.main import (
     chats_keyboard,
     cities_keyboard,
     inline_error_retry,
-    inline_home_row,
+    inline_back_home_row,
     inline_payment_failed,
     pay_button,
     payment_choice_keyboard,
@@ -172,7 +172,7 @@ async def subscription_start(message: Message, state: FSMContext, *, tg_user=Non
         message,
         banners.AD,
         SUB_STEP1.format(total=SUB_STEPS_TOTAL),
-        inline_home_row(),
+        inline_back_home_row(),
     )
     await state.set_state(SubscriptionFlow.waiting_text)
 
@@ -185,7 +185,7 @@ async def corp_subscription_start(message: Message, state: FSMContext, *, tg_use
         message,
         banners.AD,
         SUB_STEP1.format(total=CORP_STEPS_TOTAL),
-        inline_home_row(),
+        inline_back_home_row(),
     )
     await state.set_state(SubscriptionFlow.waiting_text)
 
@@ -200,7 +200,7 @@ async def subscription_retry_text(callback: CallbackQuery, state: FSMContext) ->
         callback.message,
         banners.AD,
         SUB_STEP1.format(total=_steps_total(data)),
-        inline_home_row(),
+        inline_back_home_row(),
         edit=True,
     )
 
@@ -275,7 +275,7 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
         await _drop_message(analyzing)
         await message.answer(
             "Нет доступных городов по вашему доступу. Обратитесь к администратору.",
-            reply_markup=inline_home_row(),
+            reply_markup=inline_back_home_row(),
         )
         await state.clear()
         return
@@ -551,7 +551,7 @@ async def _finalize_subscription(
                     message,
                     banners.SUBSCRIPTION,
                     SUB_ACTIVATED.format(**summary),
-                    inline_home_row(),
+                    inline_back_home_row(),
                     edit=edit,
                 )
                 return
@@ -707,7 +707,7 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
             ))
 
     if not items:
-        await banners.show_screen(message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_home_row(), edit=edit)
+        await banners.show_screen(message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_back_home_row(), edit=edit)
         return
 
     from app.services.welcome import subscriptions_status_text
