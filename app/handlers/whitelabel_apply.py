@@ -66,20 +66,30 @@ async def wl_apply_start(callback: CallbackQuery, state: FSMContext) -> None:
                 WhitelabelApplication.status == WhitelabelApplicationStatus.pending,
             ),
         )
+    from app.services import banners
+
+    # Клик внутри раздела — экран меняется на месте (banners.show_screen сам
+    # отправит новый, если фото в текст не превратить).
     if pending:
-        await callback.message.answer(
+        await banners.show_screen(
+            callback.message,
+            banners.PLAIN,
             f"У вас уже есть заявка <b>#{pending.id}</b> на рассмотрении.\n"
             "Дождитесь ответа администратора.",
-            reply_markup=inline_main_menu(),
+            inline_main_menu(),
+            edit=True,
         )
         return
     await state.set_state(WhitelabelApplyFlow.brand_title)
-    await callback.message.answer(
+    await banners.show_screen(
+        callback.message,
+        banners.PLAIN,
         "<b>📝 Заявка на WhiteLabel</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "Шаг 1/3. Как будет называться ваш бренд / сервис?\n"
         "<i>Например: «JobBot MSK» или «Работа Плюс»</i>",
-        reply_markup=inline_back_home(),
+        inline_back_home(),
+        edit=True,
     )
 
 

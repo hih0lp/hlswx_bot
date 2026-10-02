@@ -224,16 +224,6 @@ async def _error_screen(message: Message, text: str) -> None:
     await banners.show_new_screen(message, banners.ATTENTION, text, inline_error_retry(RETRY_TEXT))
 
 
-async def _drop_message(message: Message | None) -> None:
-    """Убрать промежуточный статус «Анализируем», чтобы он не копился в переписке."""
-    if message is None:
-        return
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-
 @subscription_router.message(SubscriptionFlow.waiting_text)
 async def subscription_text(message: Message, state: FSMContext) -> None:
     if await dispatch_menu_button(message, state):
@@ -246,7 +236,6 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
         await _error_screen(message, ERR_SUB_TEXT_ONLY if not message.text else ERR_CATEGORY)
         return
 
-    analyzing = await message.answer(SUB_ANALYZING)
     result = get_classifier().classify(text)
 
     async with SessionLocal() as session:
@@ -261,15 +250,18 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
         await session.commit()
         log_id = log.id
 
+    # Ошибки показываем сразу: статус «Анализируем» нужен только тому, у кого
+    # объявление принято, иначе он бы остался в чате ненужной строкой (а бот
+    # сообщения не удаляет).
     if result.category_code == "INCOMPLETE":
-        await _drop_message(analyzing)
         await _error_screen(message, ERR_CATEGORY)
         return
 
     if result.blocked:
-        await _drop_message(analyzing)
         await _error_screen(message, ERR_BLOCKED)
         return
+
+    analyzing = await message.answer(SUB_ANALYZING)
 
     data = await state.get_data()
     corp = bool(data.get("corp_mode"))
@@ -285,11 +277,12 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
     async with SessionLocal() as session:
         cities = await _available_cities(session)
     if not cities:
-        await _drop_message(analyzing)
-        await message.answer(
-            "Нет доступных городов по вашему доступу. Обратитесь к администратору.",
-            reply_markup=inline_back_home_row(),
-        )
+        # Статус «Анализируем» превращаем в сообщение об отсутствии городов.
+        no_cities = "Нет доступных городов по вашему доступу. Обратитесь к администратору."
+        try:
+            await analyzing.edit_text(no_cities, reply_markup=inline_back_home_row())
+        except Exception:
+            await message.answer(no_cities, reply_markup=inline_back_home_row())
         await state.clear()
         return
 
@@ -298,7 +291,6 @@ async def subscription_text(message: Message, state: FSMContext) -> None:
     try:
         await analyzing.edit_text(SUB_ACCEPTED)
     except Exception:
-        await _drop_message(analyzing)
         await message.answer(SUB_ACCEPTED)
 
     await state.set_state(SubscriptionFlow.selecting_city)
@@ -735,11 +727,9 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
                 ),
             ))
 
-    # Список открывают и из карточки подписки (она без баннера), поэтому при
-    # клике покинутую карточку не оставляем в переписке — `replace=edit`.
     if not items:
         await banners.show_screen(
-            message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_back_home_row(), edit=edit, replace=edit,
+            message, banners.SUBSCRIPTION, MYSUBS_EMPTY, inline_back_home_row(), edit=edit,
         )
         return
 
@@ -751,7 +741,6 @@ async def my_subscriptions(message: Message, *, tg_user=None, edit: bool = False
         MYSUBS_HEADER.format(status=subscriptions_status_text(active, finished)),
         subscriptions_keyboard(items, page=page),
         edit=edit,
-        replace=edit,
     )
 
 
@@ -782,12 +771,14 @@ async def subscription_card(callback: CallbackQuery) -> None:
     status = MYSUB_CARD_FINISHED.format(date=format_date(sub.expires_at)) if finished else _subscription_status_line(sub)
 
     await callback.answer()
-    # В кадрах «Моя подписка» и «Удаление подписки» баннера нет: карточка —
-    # просто текст. Покинутый экран со списком (он с баннером) убираем, а не
-    # оставляем в чате (`replace=True`).
+    # Карточка, подтверждение удаления и продление — тот же раздел, что и
+    # список «Мои подписки»: у них общий баннер, поэтому переходы между ними
+    # идут правкой одного сообщения (фото в текст Telegram не превращает, а
+    # бот сообщения не удаляет). В макете баннер нарисован один раз над
+    # первым кадром раздела.
     await banners.show_screen(
         callback.message,
-        banners.PLAIN,
+        banners.SUBSCRIPTION,
         MYSUB_CARD.format(
             status=status,
             city=city_label,
@@ -800,7 +791,6 @@ async def subscription_card(callback: CallbackQuery) -> None:
             manageable=_is_manageable(sub),
         ),
         edit=True,
-        replace=True,
     )
 
 
@@ -888,7 +878,6 @@ async def subscription_renew(callback: CallbackQuery) -> None:
                         SUB_ACTIVATED.format(**summary),
                         inline_back_home_row(),
                         edit=True,
-                        replace=True,
                     )
                     return
                 # Доступ закончился: платим запомненную цену за чат, если она есть.
@@ -912,7 +901,6 @@ async def subscription_renew(callback: CallbackQuery) -> None:
                     screen,
                     payment_choice_keyboard("sub", sub.id, total, balance),
                     edit=True,
-                    replace=True,
                 )
                 return
 
@@ -926,7 +914,6 @@ async def subscription_renew(callback: CallbackQuery) -> None:
             payment_error_text(exc, ERR_PAYMENT),
             inline_payment_failed(f"sub:pay:{sub_id}"),
             edit=True,
-            replace=True,
         )
         return
 
@@ -936,7 +923,6 @@ async def subscription_renew(callback: CallbackQuery) -> None:
         screen,
         pay_button(url, f"💳 Оплатить {format_rub(total)} ₽"),
         edit=True,
-        replace=True,
     )
 
 
@@ -953,11 +939,10 @@ async def subscription_delete_ask(callback: CallbackQuery) -> None:
     await callback.answer()
     await banners.show_screen(
         callback.message,
-        banners.PLAIN,
+        banners.SUBSCRIPTION,
         MYSUB_DELETE_ASK,
         subscription_delete_keyboard(sub_id),
         edit=True,
-        replace=True,
     )
 
 

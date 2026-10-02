@@ -90,7 +90,7 @@ async def show(
     key = banners.ADMIN if banner else banners.PLAIN
     token = None if preview else banners.NO_PREVIEW.set(True)
     try:
-        await banners.show_screen(message, key, text, markup, edit=edit, replace=False, keep_markup=True)
+        await banners.show_screen(message, key, text, markup, edit=edit, keep_markup=True)
     finally:
         if token is not None:
             banners.NO_PREVIEW.reset(token)

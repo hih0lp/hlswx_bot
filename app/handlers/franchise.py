@@ -83,16 +83,16 @@ def _without_unpaid_attempts(partners: list[WhitelabelPartner]) -> list[Whitelab
 
 async def _franchise_start_screen(message: Message, *, edit: bool = False) -> None:
     """Стартовый экран «Франшиза» — для тех, у кого ещё нет ни одного бота."""
-    from app.core.texts import BTN_BACK, BTN_FRANCHISE_START, FRANCHISE_TEXT
+    from app.core.texts import BTN_FRANCHISE_START, BTN_HOME, FRANCHISE_TEXT
     from app.services import banners
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_FRANCHISE_START, callback_data="franchise:join", style=STYLE_MAIN)],
-            [InlineKeyboardButton(text=BTN_BACK, callback_data="menu:home", style=STYLE_PLAIN)],
+            [InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)],
         ],
     )
-    await banners.show_screen(message, banners.FRANCHISE, FRANCHISE_TEXT, kb, edit=edit, replace=edit)
+    await banners.show_screen(message, banners.FRANCHISE, FRANCHISE_TEXT, kb, edit=edit)
 
 
 @franchise_router.message(Command("franchise"))
@@ -112,7 +112,7 @@ def _join_tier_keyboard() -> InlineKeyboardMarkup:
         )]
         for tier in ("basic", "standard", "premium")
     ]
-    rows.append([InlineKeyboardButton(text="← Главное меню", callback_data="menu:home", style=STYLE_PLAIN)])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home", style=STYLE_PLAIN)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -147,7 +147,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
     if not partner or partner.owner_telegram_id != telegram_id:
         await banners.show_screen(
             message, banners.PLAIN, "Подключение не найдено. Откройте раздел «Франшиза» заново.",
-            edit=edit, replace=edit,
+            edit=edit,
         )
         return
     tier = partner.franchise_tier
@@ -158,7 +158,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
             message, banners.PLAIN,
             "Этот бот уже зарегистрирован. Оплата не создана. "
             "Используйте отдельного бота, который ещё не подключался.",
-            edit=edit, replace=edit,
+            edit=edit,
         )
         return
     except Exception:
@@ -170,7 +170,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
         await banners.show_screen(
             message, banners.PLAIN,
             "Не удалось создать ссылку оплаты. Подключение сохранено — попробуйте позже через раздел «Франшиза».",
-            keyboard, edit=edit, replace=edit,
+            keyboard, edit=edit,
         )
         return
     price = TIER_PRICES.get(tier, TIER_PRICES["basic"])
@@ -180,7 +180,7 @@ async def _send_franchise_checkout(message: Message, partner_id: int, telegram_i
     ])
     await banners.show_screen(
         message, banners.PLAIN, FRANCHISE_PAYMENT_TEXT.format(price=price),
-        keyboard, edit=edit, replace=edit,
+        keyboard, edit=edit,
     )
 
 
@@ -198,7 +198,6 @@ async def franchise_join(callback, state) -> None:
         "<b>Подключение бота-клона</b>\nВыберите тариф франшизы:",
         _join_tier_keyboard(),
         edit=True,
-        replace=True,
     )
 
 
@@ -292,7 +291,11 @@ async def franchise_enter_token(callback, state) -> None:
     await state.update_data(franchise_partner_id=partner.id)
     await state.set_state(FranchiseOnboarding.waiting_bot_token)
     await callback.answer()
-    await callback.message.answer(FRANCHISE_CREATE_BOT_TEXT, reply_markup=_cancel_kb("franchise:cancel_token"))
+    from app.services import banners
+    await banners.show_prompt(
+        callback.message, banners.PLAIN, FRANCHISE_CREATE_BOT_TEXT,
+        _cancel_kb("franchise:cancel_token"), edit=True,
+    )
 
 
 @franchise_router.callback_query(F.data == "franchise:cancel_token")
@@ -302,11 +305,7 @@ async def franchise_token_cancel(callback, state) -> None:
         return
     await state.clear()
     await callback.answer("Отменено")
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await _owned_franchise_panel(callback.message, callback.from_user.id, edit=False)
+    await _owned_franchise_panel(callback.message, callback.from_user.id, edit=True)
 
 
 @franchise_router.message(FranchiseOnboarding.waiting_bot_token)
@@ -315,6 +314,8 @@ async def franchise_receive_token(message: Message, state) -> None:
         await state.clear()
         return
     token = (message.text or "").strip()
+    # Единственное удаление в боте: сообщение самого пользователя с секретом
+    # (токен / ключ API) не должно оставаться в переписке.
     try:
         await message.delete()
     except Exception:
@@ -339,6 +340,9 @@ async def franchise_receive_token(message: Message, state) -> None:
         return
 
     from app.core.texts import FRANCHISE_CONNECTED_TEXT, FRANCHISE_CONNECTING_TEXT
+    from app.services import banners
+    # Токен принят к проверке — у запроса токена пропадает кнопка «Отмена».
+    await banners.drop_screen_markup(message.bot, message.chat.id)
     status_message = await message.answer(FRANCHISE_CONNECTING_TEXT)
 
     from app.bot.runtime import check_partner_token
@@ -434,7 +438,7 @@ async def _clone_franchise_panel(message: Message, user, *, edit: bool = False) 
         rows.append([InlineKeyboardButton(text="💳 Платёжные реквизиты", callback_data="franchise:payout", style=STYLE_PLAIN)])
     rows.append([InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await banners.show_screen(message, banners.FRANCHISE, "\n".join(lines), kb, edit=edit, replace=edit)
+    await banners.show_screen(message, banners.FRANCHISE, "\n".join(lines), kb, edit=edit)
 
 
 @franchise_router.callback_query(F.data == "franchise:menu")
@@ -468,7 +472,7 @@ async def clone_franchise_plan(callback) -> None:
     await banners.show_screen(
         callback.message, banners.PLAIN,
         "Оплата тарифа — за один месяц. Нажмите кнопку ниже, чтобы перейти к оплате.",
-        kb, edit=True, replace=True,
+        kb, edit=True,
     )
 
 
@@ -518,7 +522,7 @@ async def franchise_payout_menu(callback, state) -> None:
     await callback.answer()
     text, kb = await _payout_menu_text_kb(current_partner_id())
     from app.services import banners
-    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True)
 
 
 @franchise_router.callback_query(F.data == "franchise:payout:start")
@@ -533,10 +537,14 @@ async def franchise_payout_start(callback, state) -> None:
     await state.update_data(franchise_payout_partner_id=current_partner_id())
     await state.set_state(FranchisePayout.waiting_shop_id)
     await callback.answer()
-    prompt = await callback.message.answer(
-        FRANCHISE_PAYOUT_ASK_SHOP_ID, reply_markup=_cancel_kb("franchise:payout:cancel"),
+    from app.services import banners
+    await banners.show_prompt(
+        callback.message, banners.PLAIN, FRANCHISE_PAYOUT_ASK_SHOP_ID,
+        _cancel_kb("franchise:payout:cancel"), edit=True,
     )
-    await state.update_data(franchise_payout_prompt_id=prompt.message_id)
+    await state.update_data(
+        franchise_payout_prompt_id=banners.last_screen_id(callback.message.chat.id) or callback.message.message_id,
+    )
 
 
 @franchise_router.callback_query(F.data == "franchise:payout:cancel")
@@ -548,7 +556,7 @@ async def franchise_payout_cancel(callback, state) -> None:
     await callback.answer("Отменено")
     text, kb = await _payout_menu_text_kb(current_partner_id())
     from app.services import banners
-    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True)
 
 
 async def _drop_prompt_markup(message: Message, state) -> None:
@@ -575,7 +583,7 @@ async def franchise_payout_clear(callback) -> None:
     await callback.answer("Реквизиты удалены")
     text, kb = await _payout_menu_text_kb(current_partner_id())
     from app.services import banners
-    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True, replace=True)
+    await banners.show_screen(callback.message, banners.PLAIN, text, kb, edit=True)
 
 
 @franchise_router.message(FranchisePayout.waiting_shop_id)
@@ -614,6 +622,8 @@ async def franchise_payout_receive_secret_key(message: Message, state) -> None:
         await state.clear()
         return
     secret_key = (message.text or "").strip()
+    # Единственное удаление в боте: сообщение самого пользователя с секретом
+    # (токен / ключ API) не должно оставаться в переписке.
     try:
         await message.delete()
     except Exception:
@@ -784,7 +794,6 @@ async def _owned_franchise_panel(message: Message, telegram_id: int, partners: l
         "\n".join(lines),
         InlineKeyboardMarkup(inline_keyboard=rows),
         edit=edit,
-        replace=edit,
     )
 
 
@@ -848,4 +857,4 @@ async def _franchise_panel(message: Message, partner: WhitelabelPartner, *, edit
             [InlineKeyboardButton(text=BTN_HOME, callback_data="menu:home", style=STYLE_PLAIN)],
         ],
     )
-    await banners.show_screen(message, banners.PLAIN, "\n".join(lines), kb, edit=edit, replace=edit)
+    await banners.show_screen(message, banners.PLAIN, "\n".join(lines), kb, edit=edit)

@@ -38,9 +38,10 @@ async def test_notifies_published_with_action_buttons(bot, world, enqueue):
 
     keyboard = [m for m in bot.sent if m["chat_id"] == world.user_tg_ids["sub1"]][0]["reply_markup"]
     buttons = [b.text for row in keyboard.inline_keyboard for b in row]
-    # Подписи кнопок — как во фрейме макета «Уведомление» (140:130).
-    assert any("Изменить текст" in b for b in buttons)
-    assert any("Закрыть объявление" in b for b in buttons)
+    # Подписи кнопок — как во фрейме макета «Уведомление»: короткие «Изменить»
+    # и «Закрыть» (длинные подписи в половину ряда обрезались многоточием).
+    assert "✏️ Изменить" in buttons
+    assert "🚫 Закрыть" in buttons
 
 
 async def test_notifies_queued_state(bot, world, enqueue):

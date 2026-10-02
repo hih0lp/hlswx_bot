@@ -220,24 +220,6 @@ async def _drop_markup(message: Message) -> None:
         logger.debug("Не удалось снять кнопки с сообщения", exc_info=True)
 
 
-async def _delete_screen(message: Message) -> None:
-    """Убрать покинутый экран совсем — вместо того чтобы оставить его в переписке.
-
-    Нужно там, где экран сменился, но перерисовать его на месте нельзя:
-    например, раздел без баннера открывается с главного экрана панели, а он с
-    баннером — фото в текст Telegram не превращает. Без удаления каждый такой
-    переход оставлял бы в чате ещё один мёртвый экран.
-
-    Удалить не всегда можно (сообщение старше 48 часов, нет прав) — тогда хотя
-    бы снимаем кнопки, чтобы по покинутому экрану нельзя было кликнуть.
-    """
-    try:
-        await message.delete()
-    except Exception:
-        logger.debug("Покинутый экран не удалился, снимаю кнопки", exc_info=True)
-        await _drop_markup(message)
-
-
 async def drop_screen_markup(bot, chat_id: int) -> None:
     """Снять кнопки с последнего показанного экрана в чате.
 
@@ -259,26 +241,9 @@ async def drop_screen_markup(bot, chat_id: int) -> None:
         logger.debug("Кнопки с прошлого экрана не сняты", exc_info=True)
 
 
-async def delete_last_screen(bot, chat_id: int) -> None:
-    """Удалить последний показанный экран в чате — для случаев, когда он не
-    просто покинут, а потерял смысл (например, экран оплаты после того, как
-    оплата прошла: кнопка «Оплатить» вела бы на уже закрытый счёт).
-
-    Если удалить нельзя (сообщение старше 48 часов, нет прав), как и в
-    `_delete_screen`, хотя бы снимаем кнопки.
-    """
-    message_id = _LAST_SCREEN.get(chat_id)
-    if message_id is None:
-        return
-    forget_screen(chat_id)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        logger.debug("Оплаченный экран не удалился, снимаю кнопки", exc_info=True)
-        try:
-            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
-        except Exception:
-            logger.debug("Не удалось снять кнопки с оплаченного экрана", exc_info=True)
+def last_screen_id(chat_id: int) -> int | None:
+    """id последнего показанного экрана в чате — например, чтобы потом снять с него кнопки."""
+    return _LAST_SCREEN.get(chat_id)
 
 
 async def _edit_screen(
@@ -415,7 +380,6 @@ async def show_screen(
     reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
     *,
     edit: bool = False,
-    replace: bool = False,
     keep_markup: bool = False,
 ) -> None:
     """Экран макета: обновить показанный экран или отправить новый.
@@ -429,20 +393,18 @@ async def show_screen(
     кнопки. Поэтому edit=True работает только для кликов по inline-кнопкам:
     их обработчик передаёт сюда сообщение бота.
 
-    `replace` — для случая, когда клик пришёл, а перерисовать нельзя: тогда
-    покинутый экран не остаётся в переписке, а удаляется. Так ведёт себя
-    админ-панель: там экран с баннером ровно один, и переход через него иначе
-    копил бы в чате мёртвые экраны на каждый вход в раздел и возврат.
+    Бот ничего не удаляет (правка заказчика от 02.10.2026). Если клик пришёл, а
+    перерисовать на месте нельзя — экран сменил род (фото ↔ текст: Telegram
+    превращать одно в другое не умеет) или подпись длиннее лимита, — у
+    покинутого сообщения снимаются inline-кнопки, а экран уходит новым.
     """
     if edit and isinstance(reply_markup, (InlineKeyboardMarkup, type(None))):
         if await redraw(message, key, text, reply_markup):
             return
         if message.from_user and message.from_user.is_bot:
             # Перерисовать не вышло: либо экран сменил род (фото ↔ текст),
-            # либо подпись длиннее лимита. Убираем покинутый и шлём новый.
-            if replace:
-                await _delete_screen(message)
-            elif not keep_markup:
+            # либо подпись длиннее лимита. Покинутый остаётся без кнопок.
+            if not keep_markup:
                 await _drop_markup(message)
             await send_banner(message, key, text, reply_markup)
             return

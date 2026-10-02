@@ -137,13 +137,16 @@ async def prompt_for_bot_token(partner: WhitelabelPartner) -> None:
         state = FSMContext(storage=get_dispatcher().storage, key=key)
         await state.set_state(FranchiseOnboarding.waiting_bot_token)
         await state.update_data(franchise_tier=partner.franchise_tier, franchise_partner_id=partner.id)
-        await banners.delete_last_screen(bot, partner.owner_telegram_id)
+        # Экран оплаты остаётся в чате, но без кнопки «Оплатить»: счёт уже закрыт.
+        await banners.drop_screen_markup(bot, partner.owner_telegram_id)
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✖️ Отмена", callback_data="franchise:cancel_token")],
         ])
-        await bot.send_message(partner.owner_telegram_id, FRANCHISE_CREATE_BOT_TEXT, reply_markup=cancel_kb)
+        sent = await bot.send_message(partner.owner_telegram_id, FRANCHISE_CREATE_BOT_TEXT, reply_markup=cancel_kb)
+        # Запоминаем экран: когда придёт токен, с него снимется кнопка «Отмена».
+        banners.remember_screen(partner.owner_telegram_id, sent.message_id)
     except Exception:
         logger.exception("Could not prompt for bot token partner_id=%s", partner.id)
 

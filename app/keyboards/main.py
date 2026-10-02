@@ -115,7 +115,14 @@ def inline_home_row() -> InlineKeyboardMarkup:
 
 
 def _back_home_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=BTN_BACK, callback_data=HOME_CB, style=STYLE_PLAIN)
+    """Выход с экрана входа в раздел — всегда «🏠 Главное меню», как в макете.
+
+    Раньше на части экранов (профиль, первый шаг подписки, пустые «Мои подписки»)
+    стояла «← Назад», ведущая в то же главное меню; правка заказчика от
+    02.10.2026 — единый вид. «← Назад» остаётся только на шагах, где он
+    возвращает на шаг назад (`_nav_row`).
+    """
+    return _home_button()
 
 
 def inline_back_home_row() -> InlineKeyboardMarkup:

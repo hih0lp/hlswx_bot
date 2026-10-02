@@ -307,31 +307,21 @@ class _RecordingBot:
         return _bot_message(photo=False).as_(self)
 
 
-async def test_screen_that_cannot_be_redrawn_replaces_the_old_one():
-    """Экран сменил род — покинутый удаляем, а не копим в переписке.
+async def test_screen_that_cannot_be_redrawn_keeps_the_old_one_without_buttons():
+    """Экран сменил род — покинутый остаётся в переписке, но без inline-кнопок.
 
-    Это единственный переход, который в админке нельзя сделать правкой на
-    месте: главный экран идёт с баннером, разделы — текстом. Без удаления
-    каждый вход в раздел и возврат оставляли бы в чате мёртвый экран.
+    Фото в текст (и обратно) Telegram не превращает, поэтому такой переход
+    нельзя сделать правкой на месте. Бот при этом ничего не удаляет (правка
+    заказчика от 02.10.2026): старое сообщение теряет кнопки, экран уходит новым.
     """
     bot = _RecordingBot()
     banners.forget_screen(ADMIN_ID)
     await banners.show_screen(
-        _bot_message(photo=True).as_(bot), banners.PLAIN, "раздел",
-        edit=True, replace=True,
-    )
-    assert bot.calls.index("DeleteMessage") < bot.calls.index("send_message")
-
-
-async def test_without_replace_the_old_screen_only_loses_buttons():
-    """Пользовательская часть не тронута: там покинутый экран остаётся."""
-    bot = _RecordingBot()
-    banners.forget_screen(ADMIN_ID)
-    await banners.show_screen(
-        _bot_message(photo=True).as_(bot), banners.PLAIN, "экран", edit=True,
+        _bot_message(photo=True).as_(bot), banners.PLAIN, "раздел", edit=True,
     )
     assert "DeleteMessage" not in bot.calls
     assert "EditMessageReplyMarkup" in bot.calls
+    assert "send_message" in bot.calls
 
 
 def test_banner_is_requested_from_exactly_one_place():

@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.models.entities import (
+    Chat,
     City,
     Payment,
     PaymentStatus,
@@ -122,7 +123,23 @@ async def test_whitelist_entry_does_not_shrink_the_city_catalog(world):
     from app.handlers.subscription import _available_cities
 
     async with SessionLocal() as session:
-        session.add(City(key="kzn", label="Казань", active=True))
+        kzn = City(key="kzn", label="Казань", active=True)
+        session.add(kzn)
+        await session.flush()
+        # Город без единого активного чата в мастер не попадает (правка от
+        # 02.10.2026), поэтому у «Казани» есть чат.
+        session.add(
+            Chat(
+                city_id=kzn.id,
+                title="Казань тест",
+                telegram_username="kzn_test_chat",
+                telegram_chat_id=-100999000111,
+                topic="Работа",
+                network="hammer",
+                sort_order=1,
+                active=True,
+            ),
+        )
         session.add(
             WhitelistEntry(
                 telegram_id=world.user_tg_ids["wl"],
